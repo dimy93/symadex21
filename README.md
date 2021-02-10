@@ -116,6 +116,6 @@ To run the geometric 4D Rotation experiments on CIFAR10 convSmall call the ***3d
 cd tf_verify/
 ./4d_cifar_rotation.sh
 ```
-The experiments' output will appear under ***tf\_verify/TransformationName\_NetworkName\_cifar\_0\_100.txt***.
+The experiments' output will appear under ***tf\_verify/TransformationName\_NetworkName\_0\_100.txt***.
 
 
