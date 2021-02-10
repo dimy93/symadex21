@@ -1,5 +1,6 @@
 Provably Robust Adversarial Examples
 ======
+This is supplementary code to the ICML 2021 submission for the 'Provably Robust Adversarial Examples' paper.
 CIFAR10 and MNIST Pixel Intensity Experiments
 ------
 
