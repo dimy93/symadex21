@@ -127,6 +127,9 @@ cd tf_verify/
 ```
 The output of the experiments above will appear under ***tf\_verify/3d\_translation\_convBig\_0\_100\_0.75.txt*** and ***tf\_verify/3d\_translation\_convBig\_0\_100\_0.85.txt***.
 
-
-
-
+To run the EoT experiment execute the following:
+```
+cd tf_verify/
+./3d_convBig_rotation_EoT.sh
+```
+The output of the experiments above will appear under ***tf\_verify/3d\_rotation\_convBig\_0\_100\_EoT.txt***
