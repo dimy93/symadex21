@@ -1,0 +1,10 @@
+pypng
+Pillow
+psutil
+dill
+numpy
+scipy
+matplotlib
+tensorflow==1.15
+onnx
+pycddlib
