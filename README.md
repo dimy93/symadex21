@@ -7,8 +7,8 @@ CIFAR10 and MNIST Pixel Intensity Experiments
 
 To download and install the code for pixel intensity CIFAR10 and MNIST experiments execute the following commands:
 ```
-git clone https://github.com/dimy93/SymbolAdex.git
-cd SymbolAdex
+git clone https://github.com/dimy93/symadex21
+cd symadex21
 ./install.sh 
 ```
 To run the our approach on MNIST convSmall call the ***run\_mnist.sh*** script as follows:
