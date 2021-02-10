@@ -65,6 +65,10 @@ To download and install the code for pixel intensity CIFAR10 and MNIST experimen
 ```
 git clone https://github.com/dimy93/symadex21
 cd symadex21
+git checkout geometric
+git clone https://github.com/eth-sri/eran.git
+cp * eran/
+cd eran/
 ./install_server.sh 
 ```
 To run the our approach on MNIST convSmall call the ***run\_mnist.sh*** script as follows:
