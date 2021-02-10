@@ -1,0 +1,637 @@
+diff --git a/configure b/configure
+index f900c53..6970ec8 100755
+--- a/configure
++++ b/configure
+@@ -54,7 +54,7 @@ EOF
+ 
+ elina_prefix=/usr/local
+ apron_prefix=/usr/local
+-cdd_prefix=/usr/local/include/cddlib
++
+ has_ocaml=0
+ has_ocamlfind=0
+ has_java=0
+diff --git a/fconv/octahedron.cpp b/fconv/octahedron.cpp
+index 2b031f4..75afb28 100644
+--- a/fconv/octahedron.cpp
++++ b/fconv/octahedron.cpp
+@@ -113,6 +113,13 @@ struct Vertex {
+     vector<double> v_double;
+     vector<int> incidence;
+     int id{};
++    Vertex(mpq_t* v, vector<double> v_double, vector<int> incidence, int id)
++    {
++        this->v = v;
++        this->v_double = v_double;
++        this->incidence = incidence;
++        this->id = id;
++    }
+ };
+ 
+ // TODO[gleb] Can also be used by comparing doubles before going to mpq - that can accelerate
+diff --git a/fppoly/compute_bounds.c b/fppoly/compute_bounds.c
+index bd5636e..8064622 100644
+--- a/fppoly/compute_bounds.c
++++ b/fppoly/compute_bounds.c
+@@ -532,6 +532,122 @@ double get_lb_using_previous_layers(elina_manager_t *man, fppoly_t *fp, expr_t *
+ 	
+ }
+ 
++expr_t* get_llb_using_previous_layers(elina_manager_t *man, fppoly_t *fp, expr_t *expr, size_t layerno){
++	size_t i;
++	int k;
++	//size_t numlayers = fp->numlayers;
++	expr_t * lexpr = copy_expr(expr);
++        fppoly_internal_t * pr = fppoly_init_from_manager(man,ELINA_FUNID_ASSIGN_LINEXPR_ARRAY);
++	if(fp->numlayers==layerno){
++		
++		k = layerno-1;
++	}
++	else if((fp->layers[layerno]->is_concat == true) || (fp->layers[layerno]->num_predecessors==2)){
++		k = layerno;
++	}
++	else{
++		k = fp->layers[layerno]->predecessors[0]-1;
++	}	
++	double res = INFINITY;
++	while(k >=0){
++	        if(fp->layers[k]->is_concat==true){
++			//sort_expr(lexpr);
++			size_t i;
++			size_t *predecessors = fp->layers[k]->predecessors;
++			size_t num_predecessors = fp->layers[k]->num_predecessors;
++			size_t common_predecessor = UINT_MAX;
++			expr_t ** sub_expr = (expr_t**)malloc(num_predecessors*sizeof(expr_t*));
++			size_t index_start = 0;
++			for(i=0; i < num_predecessors; i++){
++				size_t pred = predecessors[i]-1;
++				size_t num_neurons = fp->layers[pred]->dims;
++				if(pred < common_predecessor){
++					common_predecessor = pred;
++				}
++				sub_expr[i] = extract_subexpr(lexpr,index_start, num_neurons);
++				index_start = index_start + num_neurons;
++			}
++			for(i=0; i < num_predecessors; i++){
++				size_t iter = predecessors[i]-1;
++				while(iter!=common_predecessor){
++					get_lb_using_predecessor_layer(pr,fp, &sub_expr[i],  iter);
++					iter = fp->layers[iter]->predecessors[0]-1;
++				}
++			}
++			double inf_cst = lexpr->inf_cst;
++			double sup_cst = lexpr->sup_cst;
++			free_expr(lexpr);
++			lexpr = copy_expr(sub_expr[0]);
++			for(i=1; i < num_predecessors; i++){
++				add_expr(pr, lexpr, sub_expr[i]);
++				free_expr(sub_expr[i]);
++			}	
++			lexpr->inf_cst = lexpr->inf_cst + inf_cst;
++			lexpr->sup_cst = lexpr->sup_cst + sup_cst;
++			free_expr(sub_expr[0]);
++			free(sub_expr);
++			k = common_predecessor;
++		}
++		else if(fp->layers[k]->num_predecessors==2){
++				expr_t * lexpr_copy = copy_expr(lexpr);
++				lexpr_copy->inf_cst = 0;
++				lexpr_copy->sup_cst = 0;
++				size_t predecessor1 = fp->layers[k]->predecessors[0]-1;
++				size_t predecessor2 = fp->layers[k]->predecessors[1]-1;
++				
++				char * predecessor_map = (char *)calloc(k,sizeof(char));
++				// Assume no nested residual layers
++				int iter = fp->layers[predecessor1]->predecessors[0]-1;
++				while(iter>=0){
++					predecessor_map[iter] = 1;
++					iter = fp->layers[iter]->predecessors[0]-1;
++				}
++				iter =  fp->layers[predecessor2]->predecessors[0]-1;
++				int common_predecessor = 0;
++				while(iter>=0){
++					if(predecessor_map[iter] == 1){
++						common_predecessor = iter;
++						break;
++					}
++					iter = fp->layers[iter]->predecessors[0]-1;
++				}
++				
++				iter = predecessor1;
++				while(iter!=common_predecessor){
++					get_lb_using_predecessor_layer(pr,fp, &lexpr,  iter);
++					iter = fp->layers[iter]->predecessors[0]-1;
++				}
++				iter =  predecessor2;
++				while(iter!=common_predecessor){
++					get_lb_using_predecessor_layer(pr,fp, &lexpr_copy,  iter);
++					iter = fp->layers[iter]->predecessors[0]-1;					
++				}
++				free(predecessor_map);
++				add_expr(pr,lexpr,lexpr_copy);
++				
++				free_expr(lexpr_copy);
++				
++				// Assume at least one non-residual layer between two residual layers
++				k = common_predecessor;
++				
++				continue;
++			}
++			else {
++								
++				 res = fmin(res,get_lb_using_predecessor_layer(pr,fp, &lexpr, k));
++				 k = fp->layers[k]->predecessors[0]-1;
++				
++			}
++			
++	}
++	
++	if((fp->input_lexpr!=NULL) && (fp->input_uexpr!=NULL)){
++		expr =  replace_input_poly_cons_in_lexpr(pr, lexpr, fp);
++		free_expr( lexpr );
++		lexpr = expr;
++	}
++	return lexpr;
++}
+ 
+ double get_ub_using_previous_layers(elina_manager_t *man, fppoly_t *fp, expr_t *expr, size_t layerno){
+ 	size_t i;
+@@ -550,6 +666,8 @@ double get_ub_using_previous_layers(elina_manager_t *man, fppoly_t *fp, expr_t *
+ 		k = fp->layers[layerno]->predecessors[0]-1;
+ 	}	
+ 	double res =INFINITY;
++	
++	
+ 	while(k >=0){
+ 		if(fp->layers[k]->is_concat==true){
+                         //sort_expr(lexpr);
+@@ -643,9 +761,128 @@ double get_ub_using_previous_layers(elina_manager_t *man, fppoly_t *fp, expr_t *
+ 			}
+ 			
+ 	}
+-		
++	
+ 	res = fmin(res,compute_ub_from_expr(pr,uexpr,fp,-1)); 
+         free_expr(uexpr);
+ 	return res;
+ 	
+ }
++
++expr_t* get_lub_using_previous_layers(elina_manager_t *man, fppoly_t *fp, expr_t *expr, size_t layerno){
++	size_t i;
++	int k;
++	//size_t numlayers = fp->numlayers;
++	expr_t * uexpr = copy_expr(expr);
++        fppoly_internal_t * pr = fppoly_init_from_manager(man,ELINA_FUNID_ASSIGN_LINEXPR_ARRAY);
++        
++	if(fp->numlayers==layerno){
++		k = layerno-1;
++	}
++	else if((fp->layers[layerno]->is_concat == true) || (fp->layers[layerno]->num_predecessors==2)){
++		k = layerno;
++	}
++	else{
++		k = fp->layers[layerno]->predecessors[0]-1;
++	}	
++	double res =INFINITY;
++	while(k >=0){
++		if(fp->layers[k]->is_concat==true){
++                        //sort_expr(lexpr);
++                        size_t i;
++                        size_t *predecessors = fp->layers[k]->predecessors;
++                        size_t num_predecessors = fp->layers[k]->num_predecessors;
++                        size_t common_predecessor = UINT_MAX;
++                        expr_t ** sub_expr = (expr_t**)malloc(num_predecessors*sizeof(expr_t*));
++                        size_t index_start = 0;
++                        for(i=0; i < num_predecessors; i++){
++                                size_t pred = predecessors[i]-1;
++                                size_t num_neurons = fp->layers[pred]->dims;
++                                if(pred < common_predecessor){
++                                        common_predecessor = pred;
++                                }
++                                sub_expr[i] = extract_subexpr(uexpr,index_start, num_neurons);
++                                index_start = index_start + num_neurons;
++                        }
++                        for(i=0; i < num_predecessors; i++){
++                                size_t iter = predecessors[i]-1;
++                                while(iter!=common_predecessor){
++                                        get_ub_using_predecessor_layer(pr,fp, &sub_expr[i],  iter);
++                                        iter = fp->layers[iter]->predecessors[0]-1;
++                                }
++                        }
++			double inf_cst = uexpr->inf_cst;
++			double sup_cst = uexpr->sup_cst;
++                        free_expr(uexpr);
++                        uexpr = copy_expr(sub_expr[0]);
++                        for(i=1; i < num_predecessors; i++){
++                                add_expr(pr, uexpr, sub_expr[i]);
++                                free_expr(sub_expr[i]);
++                        }
++                        free_expr(sub_expr[0]);
++                        free(sub_expr);
++			uexpr->inf_cst = uexpr->inf_cst + inf_cst;
++			uexpr->sup_cst = uexpr->sup_cst + sup_cst;
++                        k = common_predecessor;
++                }
++
++		
++		else if(fp->layers[k]->num_predecessors==2){
++				expr_t * uexpr_copy = copy_expr(uexpr);
++				uexpr_copy->inf_cst = 0;
++				uexpr_copy->sup_cst = 0;
++				size_t predecessor1 = fp->layers[k]->predecessors[0]-1;
++				size_t predecessor2 = fp->layers[k]->predecessors[1]-1;
++				
++				char * predecessor_map = (char *)calloc(k,sizeof(char));
++				// Assume no nested residual layers
++				int iter = fp->layers[predecessor1]->predecessors[0]-1;
++				while(iter>=0){
++					predecessor_map[iter] = 1;
++					iter = fp->layers[iter]->predecessors[0]-1;
++				}
++				iter =  fp->layers[predecessor2]->predecessors[0]-1;
++				int common_predecessor = 0;
++				while(iter>=0){
++					if(predecessor_map[iter] == 1){
++						common_predecessor = iter;
++						break;
++					}
++					iter = fp->layers[iter]->predecessors[0]-1;
++				}
++				
++				iter = predecessor1;
++				while(iter!=common_predecessor){
++					get_ub_using_predecessor_layer(pr,fp, &uexpr,  iter);
++					iter = fp->layers[iter]->predecessors[0]-1;
++				}
++				iter =  predecessor2;
++				while(iter!=common_predecessor){
++					get_ub_using_predecessor_layer(pr,fp, &uexpr_copy,  iter);
++					iter = fp->layers[iter]->predecessors[0]-1;					
++				}
++				free(predecessor_map);
++				add_expr(pr,uexpr,uexpr_copy);
++				
++				free_expr(uexpr_copy);
++				
++				// Assume at least one non-residual layer between two residual layers
++				k = common_predecessor;
++				
++				continue;
++			}
++			else {
++				
++				 res= fmin(res,get_ub_using_predecessor_layer(pr,fp, &uexpr, k));
++				 k = fp->layers[k]->predecessors[0]-1;
++				 
++			}
++			
++	}
++
++	if((fp->input_lexpr!=NULL) && (fp->input_uexpr!=NULL)){
++		expr =  replace_input_poly_cons_in_lexpr(pr, uexpr, fp);
++		free_expr( uexpr );
++		uexpr = expr;
++	}
++	return uexpr;
++}
+diff --git a/fppoly/compute_bounds.h b/fppoly/compute_bounds.h
+index c76056c..6f7a603 100644
+--- a/fppoly/compute_bounds.h
++++ b/fppoly/compute_bounds.h
+@@ -41,6 +41,11 @@ double get_lb_using_previous_layers(elina_manager_t *man, fppoly_t *fp, expr_t *
+ 
+ double get_ub_using_previous_layers(elina_manager_t *man, fppoly_t *fp, expr_t *expr, size_t layerno);
+ 
++expr_t* get_llb_using_previous_layers(elina_manager_t *man, fppoly_t *fp, expr_t *expr, size_t layerno);
++
++expr_t* get_lub_using_previous_layers(elina_manager_t *man, fppoly_t *fp, expr_t *expr, size_t layerno);
++
++
+ #ifdef __cplusplus
+  }
+ #endif
+diff --git a/fppoly/fppoly.c b/fppoly/fppoly.c
+index 51ad141..2fa8847 100644
+--- a/fppoly/fppoly.c
++++ b/fppoly/fppoly.c
+@@ -457,7 +457,6 @@ double *get_upper_bound_for_linexpr0(elina_manager_t *man, elina_abstract0_t *el
+ 	return res;
+ }
+ 
+-
+ void handle_concatenation_layer(elina_manager_t* man, elina_abstract0_t* element, size_t * predecessors, size_t num_predecessors){
+     //printf("FC start here %zu %zu %zu %zu\n",num_in_neurons,num_out_neurons,predecessors[0],num_predecessors);
+     //fflush(stdout);
+@@ -492,6 +491,8 @@ void handle_concatenation_layer(elina_manager_t* man, elina_abstract0_t* element
+ }
+ 
+ 
++
++
+ bool is_greater(elina_manager_t* man, elina_abstract0_t* element, elina_dim_t y, elina_dim_t x){
+ 	fppoly_t *fp = fppoly_of_abstract0(element);
+ 	fppoly_internal_t * pr = fppoly_init_from_manager(man,ELINA_FUNID_ASSIGN_LINEXPR_ARRAY);
+@@ -517,17 +518,198 @@ bool is_greater(elina_manager_t* man, elina_abstract0_t* element, elina_dim_t y,
+ 		double lb = get_lb_using_previous_layers(man, fp, sub, fp->numlayers);
+ 		
+ 		//free_expr(sub);
+-		
++			
+ 		if(lb<0){
+ 			return true;
+ 		}
+ 		else{
++			printf("Bound %f\n", lb);
++			fflush(stdout);
+ 			return false;
+ 		}
+ 		
+ 	
+ }
+ 
++void linear_output(elina_manager_t* man, elina_abstract0_t* element, elina_dim_t y, elina_dim_t x, double *lexpr_weights){
++	fppoly_t *fp = fppoly_of_abstract0(element);
++	fppoly_internal_t * pr = fppoly_init_from_manager(man,ELINA_FUNID_ASSIGN_LINEXPR_ARRAY);
++
++	expr_t * sub = (expr_t *)malloc(sizeof(expr_t));
++	sub->inf_cst = 0;
++	sub->sup_cst = 0;
++	sub->inf_coeff = (double*)malloc(2*sizeof(double));
++	sub->sup_coeff = (double*)malloc(2*sizeof(double));
++	sub->dim =(size_t *)malloc(2*sizeof(size_t));
++	sub->size = 2;
++	sub->type = SPARSE;
++	sub->inf_coeff[0] = -1;
++	sub->sup_coeff[0] = 1;
++	sub->dim[0] = y;
++	sub->inf_coeff[1] = 1;
++	sub->sup_coeff[1] = -1;
++	sub->dim[1] = x;
++	
++	expr_t *llb = get_llb_using_previous_layers(man, fp, sub, fp->numlayers);
++	
++	memset(lexpr_weights, 0, sizeof(double) * (fp->num_pixels+1)); // inputs + cst	
++	size_t k;
++	for(size_t i=0; i < llb->size; i++){
++		if(llb->type==DENSE){
++			k = i;
++		}
++		else{
++			k = llb->dim[i];
++		}
++		lexpr_weights[k] = llb->inf_coeff[i];
++	}
++	
++	lexpr_weights[fp->num_pixels] = llb->inf_cst;
++	free_expr(llb);
++	free_expr(sub);
++}
++
++typedef struct nn_thread_linear_bounds_t{
++	size_t start;
++	size_t end;
++	elina_manager_t *man;
++	fppoly_t *fp;
++	size_t layerno;
++	size_t *idxs;
++	double **lbs;
++	double **ubs;
++}nn_thread_linear_bounds_t;
++
++
++void *get_linear_bounds_parallel(void *args){
++	
++	//elina_interval_t * res = elina_interval_alloc();
++	nn_thread_linear_bounds_t * data = (nn_thread_linear_bounds_t *)args;
++	elina_manager_t *man = data->man;
++	fppoly_t *fp = data->fp;
++    	fppoly_internal_t *pr = fppoly_init_from_manager(man, ELINA_FUNID_ASSIGN_LINEXPR_ARRAY);
++        size_t layerno = data->layerno;
++	size_t idx_start = data->start;
++	size_t idx_end = data->end;
++	size_t *idxs = data->idxs;
++	double **lbs = data->lbs;
++	double **ubs = data->ubs;
++	size_t i;
++	for(i=idx_start; i < idx_end; i++){
++		expr_t * sub = (expr_t *)malloc(sizeof(expr_t));
++		sub->inf_cst = 0;
++		sub->sup_cst = 0;
++		sub->inf_coeff = (double*)malloc(sizeof(double));
++		sub->sup_coeff = (double*)malloc(sizeof(double));
++		sub->dim =(size_t *)malloc(sizeof(size_t));
++		sub->size = 1;
++		sub->type = SPARSE;
++		sub->inf_coeff[0] = -1;
++		sub->sup_coeff[0] = 1;
++		sub->dim[0] = idxs[i];
++		
++		expr_t *llb = get_llb_using_previous_layers(man, fp, sub, layerno+1);
++		memset(lbs[i], 0, sizeof(double) * (fp->num_pixels+1)); // inputs + cst	
++		size_t k;
++		for(size_t j=0; j < llb->size; j++){
++			if(llb->type==DENSE){
++				k = j;
++			}
++			else{
++				k = llb->dim[j];
++			}
++			lbs[i][k] = llb->inf_coeff[j];
++		}
++	
++		lbs[i][fp->num_pixels] = llb->inf_cst;
++		free_expr(llb);
++
++		sub->inf_coeff[0] = 1;
++		sub->sup_coeff[0] = -1;
++	
++		expr_t *lub = get_llb_using_previous_layers(man, fp, sub, layerno+1);
++		memset(ubs[i], 0, sizeof(double) * (fp->num_pixels+1)); // inputs + cst	
++		for(size_t j=0; j < lub->size; j++){
++			if(lub->type==DENSE){
++				k = j;
++			}
++			else{
++				k = lub->dim[j];
++			}
++			ubs[i][k] = lub->inf_coeff[j];
++		}
++		ubs[i][fp->num_pixels] = lub->inf_cst;
++		free_expr(lub);
++
++		free_expr(sub);
++	}
++	return NULL;
++}
++ 
++void get_linear_bounds(elina_manager_t *man, elina_abstract0_t *element, size_t *idxs, double **lbs, double **ubs, size_t size, size_t layerno){
++	fppoly_t * fp = fppoly_of_abstract0(element);
++	size_t NUM_THREADS = sysconf(_SC_NPROCESSORS_ONLN);
++	nn_thread_linear_bounds_t args[NUM_THREADS];
++	pthread_t threads[NUM_THREADS];
++	
++	/*printf("Read  %lf %lf\n", lbs[100][700], ubs[100][700]);
++	fflush(stdout);
++	lbs[100][700] = 5; 
++	ubs[100][700] = 6;
++	printf("Wrote\n");
++	return;*/
++	printf("Layer %ld nuerons %ld\n", layerno, fp->layers[layerno]->dims );
++	fflush(stdout);
++	//return;
++
++	size_t i;
++	if(size < NUM_THREADS){
++		for (i = 0; i < size; i++){
++	    		args[i].start = i;
++	    		args[i].end = i+1;
++			args[i].man = man;
++			args[i].fp = fp;
++			args[i].layerno = layerno;
++			args[i].idxs = idxs;
++			args[i].lbs = lbs;
++			args[i].ubs = ubs;
++	    		pthread_create(&threads[i], NULL, get_linear_bounds_parallel, (void*)&args[i]);
++
++	  	}
++		for (i = 0; i < size; i = i + 1){
++			pthread_join(threads[i], NULL);
++		}
++	}
++	else{
++		size_t idx_start = 0;
++		size_t idx_n = size / NUM_THREADS;
++		size_t idx_end = idx_start + idx_n;
++
++	  	for (i = 0; i < NUM_THREADS; i++){
++	    		args[i].start = idx_start;
++	    		args[i].end = idx_end;
++			args[i].man = man;
++			args[i].fp = fp;
++			args[i].layerno = layerno;
++			args[i].idxs = idxs;
++			args[i].lbs = lbs;
++			args[i].ubs = ubs;
++	    		pthread_create(&threads[i], NULL, get_linear_bounds_parallel, (void*)&args[i]);
++			idx_start = idx_end;
++			idx_end = idx_start + idx_n;
++	    		if(idx_end> size){
++				idx_end = size;
++			}
++			if((i==NUM_THREADS-2)){
++				idx_end = size;
++
++			}
++	  	}
++		for (i = 0; i < NUM_THREADS; i = i + 1){
++			pthread_join(threads[i], NULL);
++		}
++	}
++}
+ 
+ long int max(long int a, long int b){
+ 	return a> b? a : b;
+diff --git a/fppoly/fppoly.h b/fppoly/fppoly.h
+index 8ac415f..02c69d2 100644
+--- a/fppoly/fppoly.h
++++ b/fppoly/fppoly.h
+@@ -179,6 +179,9 @@ void fppoly_free(elina_manager_t *man, fppoly_t *fp);
+ bool is_greater(elina_manager_t* man, elina_abstract0_t* element, elina_dim_t y, elina_dim_t x);
+ 
+ 
++void linear_output(elina_manager_t* man, elina_abstract0_t* element, elina_dim_t y, elina_dim_t x, double *lexpr_weights);
++
++void get_linear_bounds(elina_manager_t *man, elina_abstract0_t *element, size_t *idxs, double **lbs, double **ubs, size_t size, size_t layerno);
+ 
+ void handle_convolutional_layer(elina_manager_t* man, elina_abstract0_t* element, double *filter_weights, double * filter_bias,  
+ 				         size_t * input_size, size_t *filter_size, size_t num_filters, size_t *strides, size_t *output_size, size_t pad_top, size_t pad_left, bool has_bias, size_t *predecessors, size_t num_predecessors);
+diff --git a/python_interface/fppoly.py b/python_interface/fppoly.py
+index 41daad8..bdda891 100644
+--- a/python_interface/fppoly.py
++++ b/python_interface/fppoly.py
+@@ -582,6 +582,84 @@ def is_greater(man, element, y, x, use_area_heuristic):
+         print(inst)
+     return res
+ 
++def linear_output(man, element, y, x, array, use_area_heuristic):
++    """
++     Check if y is strictly greater than x in the abstract element 
++    
++    Parameters
++    ----------
++    man : ElinaManagerPtr
++        Pointer to the ElinaManager.
++    destructive : c_bool
++        Boolean flag.
++    y : ElinaDim
++        The dimension y in the constraint y-x>0.
++    x: ElinaDim
++	The dimension x in the constraint y-x>0.
++    use_area_heuristic: c_bool
++        whether to use area heuristic
++    Returns
++    -------
++    res = boolean
++
++    """
++    res= None
++    try:
++        linear_output_c = fppoly_api.linear_output
++        linear_output_c.restype = None
++        linear_output_c.argtypes = [ElinaManagerPtr, ElinaAbstract0Ptr, ElinaDim, ElinaDim, ndpointer(ctypes.c_double), c_bool]
++        res = linear_output_c(man, element, y, x, array, use_area_heuristic)
++    except Exception as inst:
++        print('Problem with loading/calling "linear_output" from "libfppoly.so"')
++        print(inst)
++    return res
++
++def get_linear_bounds(man, element, idxs, lbs, ubs, size, layerno):
++    """
++     Check if y is strictly greater than x in the abstract element 
++    
++    Parameters
++    ----------
++    man : ElinaManagerPtr
++        Pointer to the ElinaManager.
++    destructive : c_bool
++        Boolean flag.
++    y : ElinaDim
++        The dimension y in the constraint y-x>0.
++    x: ElinaDim
++	The dimension x in the constraint y-x>0.
++    use_area_heuristic: c_bool
++        whether to use area heuristic
++    Returns
++    -------
++    res = boolean
++
++    """
++    res = None
++    try:
++        get_linear_bounds_c = fppoly_api.get_linear_bounds
++        get_linear_bounds_c.restype = None
++        
++        DoublePtr = ctypes.POINTER(ctypes.c_double)
++        DoublePtrPtr = ctypes.POINTER(DoublePtr)
++
++        lbs_c_array = np.ctypeslib.as_ctypes(lbs)
++        DoublePtrArr = DoublePtr * lbs_c_array._length_
++        lbs_c_array = ctypes.cast(DoublePtrArr(*(ctypes.cast(row, DoublePtr) for row in lbs_c_array)), DoublePtrPtr)
++        
++        ubs_c_array = np.ctypeslib.as_ctypes(ubs)
++        DoublePtrArr = DoublePtr * ubs_c_array._length_
++        ubs_c_array = ctypes.cast(DoublePtrArr(*(ctypes.cast(row, DoublePtr) for row in ubs_c_array)), DoublePtrPtr)
++
++        idxs = idxs.astype( np.uint64 )
++        get_linear_bounds_c.argtypes = [ElinaManagerPtr, ElinaAbstract0Ptr, ndpointer(ctypes.c_size_t), DoublePtrPtr, DoublePtrPtr, ctypes.c_size_t, ctypes.c_size_t]
++        res = get_linear_bounds_c(man, element, idxs, lbs_c_array, ubs_c_array, size, layerno)
++    except Exception as inst:
++        import pdb; pdb.set_trace()
++        print('Problem with loading/calling "get_linear_bounds" from "libfppoly.so"')
++        print(inst)
++    return res
++
+ def handle_convolutional_layer(man, element, filter_weights, filter_bias,  input_size, filter_size, num_filters, strides, output_size, pad_top, pad_left, has_bias, predecessors, num_predecessors):
+     """
+     Convolutional Matrix multiplication in the first layer

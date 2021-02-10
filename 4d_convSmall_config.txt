@@ -1,0 +1,16 @@
+dataset               mnist
+noise                 0
+chunks                1
+inside_splits         12
+method                polyhedra
+spatial_transform     Scale(0.8,1.2);Rotation(-13,13)
+pixel_transform       Brightness(0.9,1.1,-0.05,0.05)
+num_tests             100
+ub_estimate           Triangle
+num_attacks           50000
+poly_eps              0.07
+num_threads           16
+max_coeff             20
+lp_samples            1000
+num_poly_check        50
+set                   test

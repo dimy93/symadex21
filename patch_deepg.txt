@@ -1,0 +1,1505 @@
+diff --git a/code/abstraction/abstraction.cpp b/code/abstraction/abstraction.cpp
+index 3c62163..2bc1586 100644
+--- a/code/abstraction/abstraction.cpp
++++ b/code/abstraction/abstraction.cpp
+@@ -103,35 +103,50 @@ Image abstractWithSimpleBox(
+         const SpatialTransformation& spatialTransformation,
+         const PixelTransformation& pixelTransformation,
+         const InterpolationTransformation& interpolationTransformation,
+-        int insideSplits) {
++        int insideSplits, const GRBEnv& env) {
+     Image ret(img.nRows, img.nCols, img.nChannels);
+     vector<vector<double>> splitPoints;
+-    vector<HyperBox> boxes = combinedDomain.split(insideSplits, splitPoints);
++    vector<HyperBox> boxes = combinedDomain.split(insideSplits, splitPoints, env);
+ 
+-    vector<future<Interval>> v;
+-    vector<Interval> cv;
++    vector<pair<future<Interval>,int>> v;
++    vector<Interval> cv(img.nRows*img.nCols*img.nChannels);
+ 
+     for (int r = 0; r < img.nRows; ++r) {
+         for (int c = 0; c < img.nCols; ++c) {
+             for (int channel = 0; channel < img.nChannels; ++channel) {
+-                v.push_back(async(
++                v.push_back(std::make_pair(async(
+                         std::launch::async,
+                         computePixelBox,
+                         r, c, channel, boxes, img,
+                         std::ref(spatialTransformation),
+                         std::ref(pixelTransformation),
+-                        std::ref(interpolationTransformation)));
++                        std::ref(interpolationTransformation)),channel + c*img.nChannels + r*img.nCols*img.nChannels));
+                 if ((int)v.size() == Constants::NUM_THREADS) {
+-                    for (auto& x : v) {
++                    /*for (auto& x : v) {
+                         cv.push_back(x.get());
+                     }
+-                    v.clear();
+-                }
++                    cout << "Sheduled box bound for " << used << " pixels" << endl;
++                    v.clear();*/
++			bool erased = false;
++			while( !erased ){
++				for (auto k = v.begin(); k != v.end(); ++k) {
++        				if ((*k).first.wait_for(std::chrono::seconds(0)) == std::future_status::ready) { 
++						auto res = (*k).first.get();
++                				cv[(*k).second] = res;
++            					v.erase(k); 
++            					k--;
++
++						erased = true;
++        				} 
++    	    	    		}
++			}
++
++               }
+             }
+         }
+     }
+     for (auto& x : v) {
+-        cv.push_back(x.get());
++         cv[x.second] = x.first.get();
+     }
+ 
+     for (int r = 0; r < img.nRows; ++r) {
+@@ -204,7 +219,14 @@ double checkBoundsWithSampling(int k, int degree, std::default_random_engine gen
+                 evalUpper += wUpper[i * degree + j] * pow(sample.x[i], j + 1);
+             }
+         }
+-
++	if( !( evalLower <= evalFLow + Constants::EPS && evalFUpp <= evalUpper + Constants::EPS ) ){
++		cout << "Bad Sample:";
++		for( int l = 0; l < sample.x.size(); l++ ) {
++			cout << sample.x[l] << " ";
++		}
++		cout << "\n";
++		cout << "evalLower: " << evalLower << " evalFLow: " << evalFLow << " evalFUpp: " << evalFUpp << " evalUpper: " << evalUpper << endl;
++	}
+         assert (evalLower <= evalFLow + Constants::EPS && evalFUpp <= evalUpper + Constants::EPS);
+         avgLen += evalUpper - evalLower;
+     }
+@@ -212,6 +234,89 @@ double checkBoundsWithSampling(int k, int degree, std::default_random_engine gen
+     return avgLen;
+ }
+ 
++pair<double,  Polyhedra> computeMILPPolyhedra(
++        const HyperBox& combinedDomain,
++        int r, int c, int i, int degree, double target,
++	const GRBEnv& env,
++	const Image& img,
++	const SpatialTransformation& spatialTransformation,
++	const PixelTransformation& pixelTransformation,
++	const InterpolationTransformation& interpolationTransformation,
++	const Interval& tfInterval){
++    std::default_random_engine generator;
++    Pixel<double> pixel = img.getPixel(r, c, i);
++    auto fLower = getLipschitzFunction(img, pixel, combinedDomain, spatialTransformation, pixelTransformation, interpolationTransformation, true);
++    auto fUpper = getLipschitzFunction(img, pixel, combinedDomain, spatialTransformation, pixelTransformation, interpolationTransformation, false);
++
++    vector<double> wLower, wUpper;
++    double biasLower, biasUpper;
++    auto res = findMILP( env, fLower,fUpper, generator, 1000, degree, target);
++    double avgLen = res.first;
++    std::tie(wLower, biasLower) = res.second.first;
++    std::tie(wUpper, biasUpper) = res.second.second;
++
++    // If average length between polyhedra bounds is worse than interval bounds, resort to interval
++    if (avgLen > tfInterval.sup - tfInterval.inf) {
++        biasLower = tfInterval.inf;
++        biasUpper = tfInterval.sup;
++        for (size_t j = 0; j < wLower.size(); ++j) {
++            wLower[j] = 0;
++            wUpper[j] = 0;
++        }
++        avgLen = biasUpper - biasLower;
++    }
++    return {avgLen, {tfInterval, wLower, biasLower, wUpper, biasUpper, degree}};
++
++}
++
++vector<Polyhedra> abstractMILPPolyhedra(
++        const HyperBox& combinedDomain,
++        const GRBEnv& env,
++        int degree,
++        double target,
++        const Image& img,
++        const SpatialTransformation& spatialTransformation,
++        const PixelTransformation& pixelTransformation,
++        const InterpolationTransformation& interpolationTransformation,
++        const Image& transformedImage) {
++    vector<Polyhedra> ret;
++    vector<future<pair<double, Polyhedra>>> v;
++    double mean = 0;
++    cout << "abstractWithPolyhedra HPs: " << combinedDomain.hps.size() <<"\n";
++    for (int r = 0; r < img.nRows; ++r) {
++        for (int c = 0; c < img.nCols; ++c) {
++            for (int i = 0; i < img.nChannels; ++i) {
++                v.push_back(async(
++                        std::launch::async,
++                        computeMILPPolyhedra,
++                        combinedDomain,
++                        r, c, i, degree, target,
++                        std::ref(env), std::ref(img),
++                        std::ref(spatialTransformation),
++                        std::ref(pixelTransformation),
++                        std::ref(interpolationTransformation),
++                        std::ref(transformedImage.a[r][c][i])));
++                if ((int)v.size() == 1){//Constants::NUM_THREADS) {
++                    for (auto& x : v) {
++                        auto tmp = x.get();
++                        ret.push_back(tmp.second);
++                        mean += tmp.first;
++                    }
++                    v.clear();
++                }
++            }
++        }
++    }
++    for (auto& x : v) {
++        auto tmp = x.get();
++        ret.push_back(tmp.second);
++        mean += tmp.first;
++    }
++    mean /= img.nRows * img.nCols * img.nChannels;
++    cout << "Average distance between polyhedra: " << mean << endl;
++    return ret;
++}
++
+ pair<double, Polyhedra> computePixelPolyhedra(
+         const HyperBox& combinedDomain,
+         int r, int c, int i,
+@@ -250,7 +355,7 @@ pair<double, Polyhedra> computePixelPolyhedra(
+     return {avgLen, {tfInterval, wLower, biasLower, wUpper, biasUpper, degree}};
+ }
+ 
+-vector<Polyhedra> abstractWithPolyhedra(
++pair< vector<Polyhedra>, vector<double> > abstractWithPolyhedra(
+         const HyperBox& combinedDomain,
+         const GRBEnv& env,
+         int degree,
+@@ -262,9 +367,10 @@ vector<Polyhedra> abstractWithPolyhedra(
+         const Image& transformedImage,
+         Statistics& counter) {
+     vector<Polyhedra> ret;
++    vector<double> ret2;
+     vector<future<pair<double, Polyhedra>>> v;
+     double mean = 0;
+-
++    cout << "abstractWithPolyhedra HPs: " << combinedDomain.hps.size() <<"\n";
+     for (int r = 0; r < img.nRows; ++r) {
+         for (int c = 0; c < img.nCols; ++c) {
+             for (int i = 0; i < img.nChannels; ++i) {
+@@ -279,11 +385,12 @@ vector<Polyhedra> abstractWithPolyhedra(
+                         std::ref(pixelTransformation),
+                         std::ref(interpolationTransformation),
+                         std::ref(transformedImage.a[r][c][i]), std::ref(counter)));
+-                if ((int)v.size() == Constants::NUM_THREADS) {
++                if ((int)v.size() == 1){//Constants::NUM_THREADS) {
+                     for (auto& x : v) {
+                         auto tmp = x.get();
+                         ret.push_back(tmp.second);
+-                        mean += tmp.first;
++                        ret2.push_back(tmp.first);
++			mean += tmp.first;
+                     }
+                     v.clear();
+                 }
+@@ -293,11 +400,12 @@ vector<Polyhedra> abstractWithPolyhedra(
+     for (auto& x : v) {
+         auto tmp = x.get();
+         ret.push_back(tmp.second);
++	ret2.push_back(tmp.first);
+         mean += tmp.first;
+     }
+     mean /= img.nRows * img.nCols * img.nChannels;
+     counter.updateAveragePolyhedra(mean);
+     cout << "Average distance between polyhedra: " << mean << endl;
+-    return ret;
++    return {ret,ret2};
+ }
+ 
+diff --git a/code/abstraction/abstraction.h b/code/abstraction/abstraction.h
+index 47dbf32..f7a96f0 100644
+--- a/code/abstraction/abstraction.h
++++ b/code/abstraction/abstraction.h
+@@ -22,9 +22,9 @@ Image abstractWithSimpleBox(
+         const SpatialTransformation& spatialTransformation,
+         const PixelTransformation &pixelTransformation,
+         const InterpolationTransformation& interpolationTransformation,
+-        int insideSplits);
++        int insideSplits, const GRBEnv& env);
+ 
+-vector<Polyhedra> abstractWithPolyhedra(
++pair< vector<Polyhedra>, vector<double> > abstractWithPolyhedra(
+         const HyperBox& combinedDomain,
+         const GRBEnv& env,
+         int degree,
+@@ -41,4 +41,16 @@ vector<Polyhedra> abstractWithCustomDP(
+         const Image& img,
+         const SpatialTransformation& spatialTransformation,
+         const InterpolationTransformation& interpolationTransformation,
+-        const Image& transformedImage);
+\ No newline at end of file
++        const Image& transformedImage);
++
++vector<Polyhedra> abstractMILPPolyhedra(
++        const HyperBox& combinedDomain,
++        const GRBEnv& env,
++        int degree,
++        double target,
++        const Image& img,
++        const SpatialTransformation& spatialTransformation,
++        const PixelTransformation& pixelTransformation,
++        const InterpolationTransformation& interpolationTransformation,
++        const Image& transformedImage);
++ 
+diff --git a/code/deepg_constraints.cpp b/code/deepg_constraints.cpp
+index d454fd0..66695c1 100644
+--- a/code/deepg_constraints.cpp
++++ b/code/deepg_constraints.cpp
+@@ -225,7 +225,7 @@ int main(int argc, char** argv) {
+ 
+     HyperBox combinedDomain = HyperBox::concatenate(spatialTransformation.domain, pixelTransformation.domain);
+ 
+-    auto verificationChunks = combinedDomain.split(n_splits, splitPoints);
++    auto verificationChunks = combinedDomain.split(n_splits, splitPoints, env);
+     if (debug) {
+         cout << "All verification chunks:" << endl;
+         for (HyperBox& hbox : verificationChunks) {
+@@ -274,7 +274,7 @@ int main(int argc, char** argv) {
+             cout << "Interval box: " << endl;
+             Image transformedImage = abstractWithSimpleBox(
+                      hbox, imgs[j], spatialTransformation, pixelTransformation,
+-                     interpolationTransformation, inside_splits);
++                     interpolationTransformation, inside_splits, env);
+ 
+             transformedImage.print_ascii();
+             transformedImage.print_csv(fou);
+@@ -293,8 +293,9 @@ int main(int argc, char** argv) {
+             if (calc_type == "polyhedra") {
+                 cout << "Abstracting with DeepG" << endl;
+                 std::chrono::system_clock::time_point begin = std::chrono::system_clock::now();
+-
+-                vector<Polyhedra> polys = abstractWithPolyhedra(
++            	vector<Polyhedra> polys;
++	    	vector<double> lengths;
++	    	tie( polys, lengths ) = abstractWithPolyhedra(
+                         hbox, env, Constants::POLY_DEGREE, Constants::POLY_EPS, imgs[j],
+                         spatialTransformation, pixelTransformation, interpolationTransformation,
+                         transformedImage, counter);
+diff --git a/code/examples/example1/config.txt b/code/examples/example1/config.txt
+index 74d494b..53c4b63 100644
+--- a/code/examples/example1/config.txt
++++ b/code/examples/example1/config.txt
+@@ -3,14 +3,14 @@ noise                 0
+ chunks                1
+ inside_splits         500
+ method                polyhedra
+-spatial_transform     Rotation(-1,1)
++spatial_transform     Rotation(-20,20)
++pixel_transform       Brightness(0.95,1.05,0.0,0.0)
+ num_tests             1
+ ub_estimate           Triangle
+-num_attacks           20
++num_attacks           15000
+ poly_eps              0.0001
+-num_threads           20
++num_threads           16
+ max_coeff             20
+ lp_samples            1000
+ num_poly_check        50
+ set                   test
+-
+diff --git a/code/geometric_constraints.cpp b/code/geometric_constraints.cpp
+index 89f92e0..993bf36 100644
+--- a/code/geometric_constraints.cpp
++++ b/code/geometric_constraints.cpp
+@@ -35,6 +35,11 @@ vector<pair<PointD, Image>> generateAttacksOutVector(
+         int numAttacks) {
+     vector<pair<PointD, Image>> ret;
+     std::default_random_engine generator;
++    for ( int i; i <  combinedDomain.dim; i++ ){
++	   cout << "[" << combinedDomain.it[i].inf <<  "," << combinedDomain.it[i].sup << "] ";
++    }
++    cout << "\n";
++    cout << "First number:" << generator() << "\n";
+     vector<PointD> randomParams = combinedDomain.sample(numAttacks, generator);
+     cout << "Generating attacks..." << endl;
+     for (const PointD& params : randomParams) {
+@@ -66,6 +71,68 @@ vector<pair<PointD, Image>> generateAttacksOutVector(
+     return ret;
+ }
+ 
++void generateGridOutVector(
++        vector<vector<double>> &grid_image_vector,
++	vector<double*> &grid_image_pointers,
++        const HyperBox& combinedDomain,
++        const SpatialTransformation& spatialTransformation,
++        const PixelTransformation& pixelTransformation,
++        const InterpolationTransformation& interpolationTransformation,
++        const Image& img, vector<int> splits) {
++	
++    long long combos = 1;
++    
++    //cout << "Show parent:\n";
++    //img.print_ascii();
++
++    for ( int i = 0; i < combinedDomain.it.size(); i++ ) {
++	combos *= splits[i];
++    }
++
++    vector<PointD> paramCombos;
++    for ( long long i = 0; i < combos; i++ ){
++	    std::vector<double> x(combinedDomain.it.size());
++	    long long i_cp = i;
++	    for ( int j = 0; j < combinedDomain.it.size(); j++ ) {
++		    x[j] = ( combinedDomain.it[j].sup - combinedDomain.it[j].inf ) * ( i_cp % splits[j] ) / double( splits[j] );
++		    x[j] += combinedDomain.it[j].inf;
++		    i_cp /= splits[j];
++	    }
++	    paramCombos.emplace_back(x);
++    } 
++    cout << "Generating grid attacks..." << endl;
++    for (const PointD& params : paramCombos) {
++        Image newImage(img.nRows, img.nCols, img.nChannels);
++        for (int r = 0; r < img.nRows; ++r) {
++            for (int c = 0; c < img.nCols; ++c) {
++                for (int i = 0; i < img.nChannels; ++i) {
++                    auto pixel = img.getPixel(r, c, i);
++                    auto fLower = getLipschitzFunction(
++                            img, pixel, combinedDomain,
++                            spatialTransformation, pixelTransformation, interpolationTransformation, true);
++                    auto fUpper = getLipschitzFunction(
++                            img, pixel, combinedDomain,
++                            spatialTransformation, pixelTransformation, interpolationTransformation, false);
++                    newImage.a[r][c][i] = {fLower.f(params), fUpper.f(params)};
++                }
++            }
++        }
++	/*auto newpixs = newImage.to_vector();
++	cout << "[ "; 
++	for( double newpix : newpixs ){
++		cout << newpix << ", ";
++	}
++	cout << " ]\n";*/
++        grid_image_vector.push_back(newImage.to_vector());
++    }
++    cout << "Grid attacks generated!" << endl;
++
++    grid_image_pointers.resize(grid_image_vector.size());
++    for (int i = 0; i < grid_image_vector.size(); i++) {
++        grid_image_pointers[i] = grid_image_vector[i].data();
++    }
++}
++
+ bool checkImagePoly(const Image& img, vector<Polyhedra> polys, PointD params) {
+     assert((int)polys.size() == img.nRows * img.nCols * img.nChannels);
+     int nxt = 0;
+@@ -143,7 +210,7 @@ TransformAttackContainer::TransformAttackContainer(double noise,
+                                         PixelTransformation& pixel_transform,
+                                         bool debug,
+                                         HyperBox combinedDomain,
+-                                        vector<HyperBox> verificationChunks)
++                                        vector<HyperBox> verificationChunks, vector<int> grid_splits)
+                                         : spatialTransformation(spatial_transform),
+                                         pixelTransformation(pixel_transform)
+                                         {
+@@ -151,14 +218,15 @@ TransformAttackContainer::TransformAttackContainer(double noise,
+     this -> inside_splits = inside_splits;
+     this -> calc_type = calc_type;
+     this -> debug = debug;
+-    this -> combinedDomain = combinedDomain;
+-    this -> verificationChunks = verificationChunks;
++    this-> oldDomain = this -> combinedDomain = combinedDomain;
++    this-> oldChunks = this -> verificationChunks = verificationChunks;
+     this -> spatialTransformation = spatialTransformation;
+     this -> pixelTransformation = pixelTransformation;
+     this -> images = images;
+     this -> nRows = nRows;
+     this -> nCols = nCols;
+     this -> nChannels = nChannels;
++    this -> grid_splits = grid_splits;
+ }
+ 
+ 
+@@ -248,8 +316,11 @@ TransformAttackContainer* getTransformAttackContainer(char* config_location) {
+     PixelTransformation& pixel_transform = *getPixelTransformation(pixelTransformName);
+ 
+     HyperBox combinedDomain = HyperBox::concatenate(spatial_transform.domain, pixel_transform.domain);
+-    auto verificationChunks = combinedDomain.split(n_splits, splitPoints);
+-
++    auto verificationChunks = combinedDomain.split(n_splits, splitPoints, env);    
++    vector<int> grid_splits;
++    for( int i = 0; i < combinedDomain.it.size(); i++ ){
++	    grid_splits.push_back(1);
++    }
+     return new TransformAttackContainer(noise,
+                                     inside_splits,
+                                     nRows,
+@@ -261,10 +332,54 @@ TransformAttackContainer* getTransformAttackContainer(char* config_location) {
+                                     pixel_transform,
+                                     debug,
+                                     combinedDomain,
+-                                    verificationChunks);
++                                    verificationChunks,
++				    grid_splits);
++}
++void TransformAttackContainer::reinit(){
++	this->combinedDomain = this->oldDomain; 
++	this->verificationChunks = this->oldChunks;
++}
++void TransformAttackContainer::updateHyperBox(double* params_lb, double* params_ub, int n_splits) {
++	vector<Interval> v;		
++	for( int i = 0; i < this->combinedDomain.it.size(); i++ ){
++		v.push_back(Interval(params_lb[i], params_ub[i]));
++	}
++	this->combinedDomain = HyperBox( v );
++    	vector<vector<double>> splitPoints;
++	this->verificationChunks = this->combinedDomain.split(n_splits, splitPoints, env);
++    	cout <<"updateHyperBox4 " << this->verificationChunks.size() << endl;
++}
++
++void TransformAttackContainer::addHP(double* weights, double bias) {
++	this->combinedDomain.hps.push_back( HP( weights, weights + this->combinedDomain.it.size(), bias ) );
++	for (int i = 0; i < this->verificationChunks.size(); i++ ) {
++		this->verificationChunks[i].hps.push_back( HP( weights, weights + this->combinedDomain.it.size(), bias ) );
++	}
+ }
+ 
+-void TransformAttackContainer::setTransformationsAndAttacksFor(int image_number, bool attack, bool verbose) {
++void TransformAttackContainer::get_attack_by_params(double* params){
++	PointD params_vec = PointD( vector<double>( params, params + this->combinedDomain.it.size() ) );
++	assert( this->img_orig.size() == 1 );
++        Image img = this->img_orig[0];
++	Image newImage(img.nRows, img.nCols, img.nChannels);
++        for (int r = 0; r < img.nRows; ++r) {
++            for (int c = 0; c < img.nCols; ++c) {
++                for (int i = 0; i < img.nChannels; ++i) {
++                    auto pixel = img.getPixel(r, c, i);
++                    auto fLower = getLipschitzFunction(
++                            img, pixel, combinedDomain,
++                            spatialTransformation, pixelTransformation, interpolationTransformation, true);
++                    auto fUpper = getLipschitzFunction(
++                            img, pixel, combinedDomain,
++                            spatialTransformation, pixelTransformation, interpolationTransformation, false);
++                    newImage.a[r][c][i] = {fLower.f(params_vec), fUpper.f(params_vec)};
++                }
++            }
++        }
++	this->image_by_params = newImage.to_vector();
++}
++
++void TransformAttackContainer::setTransformationsAndAttacksFor(int image_number, bool attack, bool attack_only, double target, bool verbose) {
+     if (!verbose) {
+         cout.setstate(ios_base::failbit);
+     } else {
+@@ -277,6 +392,7 @@ void TransformAttackContainer::setTransformationsAndAttacksFor(int image_number,
+     transform_pointers.clear();
+     attack_param_pointers.clear();
+     attack_image_pointers.clear();
++    grid_image_vector.clear();
+     double totalPolyRuntime = 0, totalBoxRuntime = 0;
+     ifstream fin(images);
+     string line;
+@@ -284,7 +400,8 @@ void TransformAttackContainer::setTransformationsAndAttacksFor(int image_number,
+         getline(fin, line);
+     }
+     Image img = Image(nRows, nCols, nChannels, line, noise);
+-
++    this->img_orig.clear();
++    this->img_orig.push_back( img ); 
+     if (debug) {
+         cout << "All verification chunks:" << endl;
+         for (HyperBox& hbox : verificationChunks) {
+@@ -292,6 +409,7 @@ void TransformAttackContainer::setTransformationsAndAttacksFor(int image_number,
+         }
+     }
+     cout << "created chunks" << endl;
++    cout << "setTransformationsAndAttacksFor HPs: " << this->verificationChunks[0].hps.size() << endl;
+ 
+     std::vector<int> counts_picture;
+     // iteration over images
+@@ -308,7 +426,25 @@ void TransformAttackContainer::setTransformationsAndAttacksFor(int image_number,
+     auto attacks = generateAttacksOutVector(
+             attack_param_vector, attack_image_vector, combinedDomain, spatialTransformation, pixelTransformation,
+             interpolationTransformation, img, num_attacks);
++
+     cout << "created attacks" << endl;
++
++    attack_param_pointers.resize(attack_param_vector.size());
++    attack_image_pointers.resize(attack_image_vector.size());
++
++    for (int i = 0; i < attack_param_vector.size(); i++) {
++        attack_param_pointers[i] = attack_param_vector[i].data();
++    }
++
++    for (int i = 0; i < attack_image_vector.size(); i++) {
++        attack_image_pointers[i] = attack_image_vector[i].data();
++    }
++    
++    generateGridOutVector( grid_image_vector, grid_image_pointers, combinedDomain, spatialTransformation, pixelTransformation, interpolationTransformation, img, grid_splits );
++
++    if (attack_only) {
++	    return;
++    }
+     vector<bool> checked(attacks.size(), false);
+     vector<bool> checkedPoly(attacks.size(), false);
+     vector<bool> checkedNumeric(attacks.size(), false);
+@@ -329,7 +465,7 @@ void TransformAttackContainer::setTransformationsAndAttacksFor(int image_number,
+         cout << "Interval box: " << endl;
+         Image transformedImage = abstractWithSimpleBox(
+                  hbox, img, spatialTransformation, pixelTransformation,
+-                 interpolationTransformation, inside_splits);
++                 interpolationTransformation, inside_splits, env);
+ 
+         transformedImage.print_ascii();
+         transform_vector.push_back(transformedImage.to_vector());
+@@ -345,11 +481,34 @@ void TransformAttackContainer::setTransformationsAndAttacksFor(int image_number,
+             }
+         }
+ 
++	if ( !::isnan(target) ){
++            	cout << "Abstracting with MILP target "<< target << endl;
++		std::chrono::system_clock::time_point begin = std::chrono::system_clock::now();
++		vector<Polyhedra> polys = abstractMILPPolyhedra( hbox, env, Constants::POLY_DEGREE, target,
++				img, spatialTransformation, pixelTransformation, interpolationTransformation, 
++				transformedImage);
++		for (auto &poly : polys) {
++			transform_vector.push_back(poly.to_vector());
++		}
++		std::chrono::system_clock::time_point end = std::chrono::system_clock::now();
++            	auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - begin);
++		cout << "MILP runtime (sec): " << duration.count() / 1000.0 << endl;
++        	vector<double> end_spec;
++        	transform_vector.push_back(end_spec);
++     		transform_pointers.resize(transform_vector.size());
++
++    		for (int i = 0; i < transform_vector.size(); i++) {
++        		transform_pointers[i] = transform_vector[i].data();
++    		}
++		return;
++	}
++
+         if (calc_type == "polyhedra") {
+             cout << "Abstracting with DeepG" << endl;
+             std::chrono::system_clock::time_point begin = std::chrono::system_clock::now();
+ 
+-            vector<Polyhedra> polys = abstractWithPolyhedra(
++            vector<Polyhedra> polys;
++	    tie( polys, lenghts_vector ) = abstractWithPolyhedra(
+                     hbox, env, Constants::POLY_DEGREE, Constants::POLY_EPS, img,
+                     spatialTransformation, pixelTransformation, interpolationTransformation,
+                     transformedImage, counter);
+@@ -385,20 +544,11 @@ void TransformAttackContainer::setTransformationsAndAttacksFor(int image_number,
+     }
+ 
+     transform_pointers.resize(transform_vector.size());
+-    attack_param_pointers.resize(attack_param_vector.size());
+-    attack_image_pointers.resize(attack_image_vector.size());
+ 
+     for (int i = 0; i < transform_vector.size(); i++) {
+         transform_pointers[i] = transform_vector[i].data();
+     }
+ 
+-    for (int i = 0; i < attack_param_vector.size(); i++) {
+-        attack_param_pointers[i] = attack_param_vector[i].data();
+-    }
+-
+-    for (int i = 0; i < attack_image_vector.size(); i++) {
+-        attack_image_pointers[i] = attack_image_vector[i].data();
+-    }
+-
+     sanityChecks(checked, checkedNumeric, checkedPoly, calc_type);
+ }
++
+diff --git a/code/geometric_constraints.h b/code/geometric_constraints.h
+index 8cfc47a..6c93253 100644
+--- a/code/geometric_constraints.h
++++ b/code/geometric_constraints.h
+@@ -25,31 +25,65 @@ class TransformAttackContainer{
+                                     PixelTransformation& pixelTransformation,
+                                     bool debug,
+                                     HyperBox combinedDomain,
+-                                    vector<HyperBox> verificationChunks);
++                                    vector<HyperBox> verificationChunks,
++				    vector<int> grid_splits);
+ 
+         // ---- Members set by Constructor
+         double noise;
++	vector<Image> img_orig;
++	vector<double> image_by_params;
++	vector<int> grid_splits;
++	vector<double> lenghts_vector;
+         int inside_splits, nRows, nCols, nChannels;
+         string calc_type, images;
+         bool debug;
+-        HyperBox combinedDomain;
+-        vector<HyperBox> verificationChunks;
++	vector<double> hyperbox;
++        HyperBox combinedDomain, oldDomain;
++        vector<HyperBox> verificationChunks, oldChunks;
+         SpatialTransformation& spatialTransformation;
+         PixelTransformation& pixelTransformation;
+         const InterpolationTransformation& interpolationTransformation = InterpolationTransformation();
+ 
+         // ---- Members set by Methods
+-        vector<vector<double> > transform_vector, attack_param_vector, attack_image_vector;
+-        vector<double*> transform_pointers, attack_param_pointers, attack_image_pointers;
++        vector<vector<double> > transform_vector, attack_param_vector, attack_image_vector, grid_image_vector;
++        vector<double*> transform_pointers, attack_param_pointers, attack_image_pointers, grid_image_pointers;
+         vector<int> transform_vector_dim_1;
+ 
+         // ---- Methods
+-        void setTransformationsAndAttacksFor(int image_number, bool attack, bool verbose);
++        void setTransformationsAndAttacksFor(int image_number, bool attack, bool attack_only, double target, bool verbose);
++	void updateHyperBox(double *params_lb, double *params_ub, int n_splits);
++	void addHP( double *weights, double bias );
++	void reinit();
++	void get_attack_by_params(double* params);
+ };
+ TransformAttackContainer* getTransformAttackContainer(char* config);
+ 
+-void setTransformationsAndAttacksFor(TransformAttackContainer& container, int image_number, bool attack, bool verbose) {
+-    container.setTransformationsAndAttacksFor(image_number, attack, verbose);
++void setTransformationsAndAttacksFor(TransformAttackContainer& container, int image_number, bool attack, bool attack_only, double target, bool verbose) {
++    container.setTransformationsAndAttacksFor(image_number, attack, attack_only, target, verbose);
++};
++
++void reinit(TransformAttackContainer& container) {
++    container.reinit();
++};
++
++double* getHyperBox(TransformAttackContainer& container){
++       container.hyperbox = vector<double>();
++       for( int i=0; i < container.combinedDomain.it.size(); i++){
++               container.hyperbox.push_back(container.combinedDomain.it[i].inf);
++               container.hyperbox.push_back(container.combinedDomain.it[i].sup);
++       }
++       return container.hyperbox.data();
++}
++
++int getHyperBoxSize(TransformAttackContainer& container){
++       return container.hyperbox.size();
++}
++
++void addHP(TransformAttackContainer& container, double* weights, double bias){
++	container.addHP( weights, bias );
++}
++void updateHyperBox(TransformAttackContainer& container, double* params_lb, double* params_ub, int n_splits) {
++	container.updateHyperBox( params_lb, params_ub, n_splits );
+ };
+ 
+ // this works because vectors are continuous in memory
+@@ -57,6 +91,36 @@ double** get_transformations(TransformAttackContainer& container) {
+     return container.transform_pointers.data();
+ };
+ 
++double* get_pixel_lentghts(TransformAttackContainer& container) {
++    return container.lenghts_vector.data();
++};
++
++int get_pixel_lentghts_dim(TransformAttackContainer& container) {
++    return container.lenghts_vector.size();
++};
++
++void set_grid(TransformAttackContainer& container, int* split ){
++	for( int i = 0; i < container.grid_splits.size(); i++ ){
++		container.grid_splits[i] = split[i];
++	}
++}
++
++double** get_grid(TransformAttackContainer& container) {
++    return container.grid_image_pointers.data();
++};
++
++int get_grid_dim_0(TransformAttackContainer& container) {
++    return container.grid_image_vector.size();
++};
++
++int get_grid_dim_1(TransformAttackContainer& container) {
++    if (container.grid_image_vector.size() == 0) {
++        return 0;
++    }
++    return container.grid_image_vector[0].size();
++};
++
++
+ int get_transformations_dim_0(TransformAttackContainer& container) {
+     return container.transform_vector.size();
+ };
+@@ -98,4 +162,14 @@ int get_attack_images_dim_1(TransformAttackContainer& container) {
+     }
+     return container.attack_image_vector[0].size();
+ };
++
++int get_attack_by_params_size(TransformAttackContainer& container) {
++	return container.image_by_params.size();
++};
++
++double* get_attack_by_params(TransformAttackContainer& container, double* params) {
++	container.get_attack_by_params(params);
++	return container.image_by_params.data();
++};
++
+ } // end extern "C"
+diff --git a/code/geometric_constraints.py b/code/geometric_constraints.py
+index 96b60f6..1800d4e 100644
+--- a/code/geometric_constraints.py
++++ b/code/geometric_constraints.py
+@@ -1,7 +1,17 @@
+ 
+ from geometric_constraints_h import *
+ from ctypes import *
++import numpy as np
++from numpy.ctypeslib import ndpointer
+ 
++def reinit(container):
++    try:
++        reinit_cpp = geometric_api.reinit
++        reinit_cpp.restype = POINTER(c_int)
++        reinit_cpp.argtypes = [TransformAttackContainerPtr]
++        pointer = reinit_cpp(container)
++    except:
++        print('reinit did not work')
+ 
+ def get_transform_attack_container(config):
+     try:
+@@ -14,16 +24,42 @@ def get_transform_attack_container(config):
+         print('get_transforms_attack_container did not work')
+     return transforms_attack_container
+ 
++def set_grid(container, grid_splits):
++    grid_splits = grid_splits.astype(np.int32)
++    try:
++        set_grid_cpp = geometric_api.set_grid
++        set_grid_cpp.restype = None
++        set_grid_cpp.argtypes = [TransformAttackContainerPtr, ndpointer(c_int)]
++        set_grid_cpp(container, grid_splits)
++    except:
++        print('set_grid did not work')
+ 
+-def set_transform_attack_for(container, i, attack=True, verbose=False):
++def set_transform_attack_for(container, i, attack=True, attack_only=False, verbose=False, target=float("nan") ):
+     try:
+         set_transform_attack_for_cpp = geometric_api.setTransformationsAndAttacksFor
+         set_transform_attack_for_cpp.restype = None
+-        set_transform_attack_for_cpp.argtypes = [TransformAttackContainerPtr, c_int, c_bool, c_bool]
+-        set_transform_attack_for_cpp(container, i, attack, verbose)
++        set_transform_attack_for_cpp.argtypes = [TransformAttackContainerPtr, c_int, c_bool, c_bool, c_double, c_bool]
++        set_transform_attack_for_cpp(container, i, attack, attack_only, target, verbose)
+     except:
+         print('set_transform_attack_for did not work')
+ 
++def update_geom_box(container, lb, ub, n_splits):
++    try:
++        update_geom_box_cpp = geometric_api.updateHyperBox
++        update_geom_box_cpp.restype = None
++        update_geom_box_cpp.argtypes = [TransformAttackContainerPtr, ndpointer(c_double), ndpointer(c_double), c_int]
++        update_geom_box_cpp(container, lb, ub, n_splits)
++    except:
++        print('update_geom_box did not work')
++
++def add_geom_hp(container, w, b):
++    try:
++        add_geom_hp_cpp = geometric_api.addHP
++        add_geom_hp_cpp.restype = None
++        add_geom_hp_cpp.argtypes = [TransformAttackContainerPtr, ndpointer(c_double), c_double]
++        add_geom_hp_cpp(container, w, b)
++    except Exception as e:
++        print('add_geom_hp didnt work')
+ 
+ def get_transformation_dim_0(container):
+     try:
+@@ -128,3 +164,100 @@ def get_attack_images(container):
+     dim_0 = get_attack_images_dim_0(container)
+     dim_1 = get_attack_images_dim_1(container)
+     return [p[:dim_1] for p in pointer[:dim_0]]
++
++def get_pixel_lentghts_dim(container):
++    try:
++        get_pixel_lentghts_dim_cpp = geometric_api.get_pixel_lentghts_dim
++        get_pixel_lentghts_dim_cpp.restype = c_int
++        get_pixel_lentghts_dim_cpp.argtypes = [TransformAttackContainerPtr]
++        dim = get_pixel_lentghts_dim_cpp(container)
++    except:
++        print('get_pixel_lentghts_dim did not work')
++    return dim
++
++def get_pixel_lentghts(container):
++    try:
++        get_pixel_lentghts_dim_cpp = geometric_api.get_pixel_lentghts
++        get_pixel_lentghts_dim_cpp.restype = POINTER(c_double)
++        get_pixel_lentghts_dim_cpp.argtypes = [TransformAttackContainerPtr]
++        pointer = get_pixel_lentghts_dim_cpp(container)
++    except:
++        print('get_pixel_lentghts did not work')
++    dim = get_pixel_lentghts_dim(container)
++    return pointer[:dim]
++
++def get_grid_dim_0(container):
++    try:
++        get_grid_dim_0_cpp = geometric_api.get_grid_dim_0
++        get_grid_dim_0_cpp.restype = c_int
++        get_grid_dim_0_cpp.argtypes = [TransformAttackContainerPtr]
++        dim = get_grid_dim_0_cpp(container)
++    except:
++        print('get_grid_dim_0 did not work')
++    return dim
++
++
++def get_grid_dim_1(container):
++    try:
++        get_grid_dim_1_cpp = geometric_api.get_grid_dim_1
++        get_grid_dim_1_cpp.restype = c_int
++        get_grid_dim_1_cpp.argtypes = [TransformAttackContainerPtr]
++        dim = get_grid_dim_1_cpp(container)
++    except:
++        print('get_grid_dim_1 did not work')
++    return dim
++
++
++def get_grid_images(container):
++    try:
++        get_grid_cpp = geometric_api.get_grid
++        get_grid_cpp.restype = POINTER(POINTER(c_double))
++        get_grid_cpp.argtypes = [TransformAttackContainerPtr]
++        pointer = get_grid_cpp(container)
++    except:
++        print('get_grid_images did not work')
++    dim_0 = get_grid_dim_0(container)
++    dim_1 = get_grid_dim_1(container)
++    return [p[:dim_1] for p in pointer[:dim_0]]
++
++def get_attack_by_params(container, params):
++    try:
++        get_attack_by_params_cpp = geometric_api.get_attack_by_params
++        get_attack_by_params_cpp.restype = POINTER(c_double)
++        get_attack_by_params_cpp.argtypes = [TransformAttackContainerPtr, ndpointer(c_double)]
++        pointer = get_attack_by_params_cpp(container, params)
++
++        get_attack_by_params_size_cpp = geometric_api.get_attack_by_params_size
++        get_attack_by_params_size_cpp.restype = c_int
++        get_attack_by_params_size_cpp.argtypes = [TransformAttackContainerPtr]
++        dim = get_attack_by_params_size_cpp(container)
++    except:
++        print('get_attack_by_params did not work')
++    return pointer[:dim]
++
++def get_geom_box_size(container):
++    try:
++        get_geom_box_size_cpp = geometric_api.getHyperBoxSize
++        get_geom_box_size_cpp.restype = c_int
++        get_geom_box_size_cpp.argtypes = [TransformAttackContainerPtr]
++        size = get_geom_box_size_cpp(container)
++    except:
++        print('get_geom_box_size did not work')
++
++    return size
++
++def get_geom_box(container):
++    try:
++        get_geom_box_cpp = geometric_api.getHyperBox
++        get_geom_box_cpp.restype = POINTER(c_double)
++        get_geom_box_cpp.argtypes = [TransformAttackContainerPtr]
++        ptr = get_geom_box_cpp(container)
++        dim_0 = get_geom_box_size(container)
++        arr = np.array( ptr[ : dim_0 ] )
++        ub = arr[1::2]
++        lb = arr[::2]
++    except:
++        print('get_geom_box did not work')
++
++    return lb, ub
++
+diff --git a/code/utils/lipschitz.cpp b/code/utils/lipschitz.cpp
+index 83a742b..81198f3 100644
+--- a/code/utils/lipschitz.cpp
++++ b/code/utils/lipschitz.cpp
+@@ -2,6 +2,7 @@
+ #include "utils/constants.h"
+ #include <queue>
+ #include <random>
++#include <stdlib.h> 
+ 
+ std::ostream& operator << (std::ostream& os, const PointD& pt) {
+     os << "(";
+@@ -43,14 +44,35 @@ vector<PointD> HyperBox::sample(int k, std::default_random_engine generator) con
+     }
+ 
+     vector<PointD> ret;
++    int attempts = 0;
+     for (int i = 0; i < k; ++i) {
++	
+         PointD samplePoint;
+         for (auto d : diss) {
+             samplePoint.x.push_back(d(generator));
+         }
++	bool valid= true;
++	for (int j = 0; j < this->hps.size(); j++) {
++		double dot = 0;
++		assert( samplePoint.x.size() == this->hps[j].w.size() ); 
++		for ( int l = 0; l < samplePoint.x.size(); l++ ){
++			dot += this->hps[j].w[l] * samplePoint.x[l];
++		}
++		dot += this->hps[j].b;
++		if ( dot > 0 ){
++			valid = false;
++			break;
++		}
++	}
++	attempts++;
++	if (!valid) {
++		i--;
++		continue;
++	}
+         ret.push_back(samplePoint);
+     }
+ 
++    //cout << "Sampled " <<  attempts << "/" << k << endl;
+     return ret;
+ }
+ 
+@@ -75,6 +97,73 @@ PointD HyperBox::center() const {
+     return PointD(ret);
+ }
+ 
++/*
++PointD HyperBox::dev() const {
++	std::vector<double> ret;
++	for (auto itv : it) {
++		ret.push_back(0.5 * (itv.sup - itv.inf));
++	}
++	return PointD(ret);
++}
++
++bool HyperBox::hp_out(const HP &hp) const {
++	double loss1 = 0, loss2 = 0;
++	PointD mid = this->center();
++	PointD dev = this->dev();
++	assert(this->dim == hp.w.size());
++	for( int i = 0; i < dev.x.size(); i++ ){
++		loss1 -= abs( dev.x[i] * hp.w[i] );
++		loss2 += mid.x[i] * hp.w[i];
++	}
++	loss2 += hp.b;
++	return loss1 + loss2 > 1e-7;
++}
++
++bool HyperBox::check_out(const vector<HP> &hps) const {
++	for( const auto hp: hps ){
++		if( hp_out( hp ) ){
++			bool check_cond = ( hp.w[0] == 1 && -hp.b < it[0].inf ) || ( hp.w[1] == 1 && -hp.b < it[1].inf ) || ( hp.w[0] == -1 && hp.b > it[0].sup ) || ( hp.w[1] == -1 && hp.b > it[1].sup );
++			if ( !check_cond ) {
++				cout << "HP: [";
++				for( int i = 0; i < hp.w.size(); i++ ){
++					cout << hp.w[i] << ", ";
++				}
++				cout << hp.b << "]\n";
++
++				cout << "Box: [";
++				for( int i = 0; i < hp.w.size(); i++ ){
++					cout << "["<< it[i].inf << ", " << it[i].sup << "] ";
++				}
++				cout << "]\n";
++				assert( check_cond );
++			}
++			return true;
++		}
++	}
++	return false;
++}
++*/
++
++bool HyperBox::check_out(const vector<HP>& hps, const GRBEnv& env) const {
++    GRBModel model = GRBModel(env);
++    model.set(GRB_IntParam_OutputFlag, 0);
++
++    vector<GRBVar> x;
++    for (size_t i = 0; i < dim; ++i) {
++	    x.push_back(model.addVar(it[i].inf, it[i].sup, 0.0, GRB_CONTINUOUS));
++    }
++
++    for (const HP& hp: hps) {
++        GRBLinExpr constr = hp.b;
++        for (size_t i = 0; i < dim; ++i) {
++		constr += hp.w[i] * x[i];
++        }
++        model.addConstr(constr <= 0);
++    }
++    model.optimize();
++    return model.get( GRB_IntAttr_Status ) != GRB_OPTIMAL;
++}
++
+ void HyperBox::split(size_t dim1, HyperBox &hbox1, HyperBox &hbox2) const {
+     assert(dim1 <= dim);
+     hbox1.it.insert(hbox1.it.begin(), it.begin(), it.begin() + dim1);
+@@ -91,7 +180,7 @@ HyperBox HyperBox::concatenate(const HyperBox &hbox1, const HyperBox &hbox2) {
+     return hbox;
+ }
+ 
+-vector<HyperBox> HyperBox::split(int k, vector<vector<double>>& splitPoints) const {
++vector<HyperBox> HyperBox::split(int* k, vector<vector<double>>& splitPoints, const GRBEnv& env) const {
+     if (!splitPoints.empty()) {
+         assert(splitPoints.size() == dim);
+         for (int i = 0; i < dim; ++i) {
+@@ -102,12 +191,73 @@ vector<HyperBox> HyperBox::split(int k, vector<vector<double>>& splitPoints) con
+     } else {
+         splitPoints.resize(dim);
+         for (int i = 0; i < dim; ++i) {
+-            double delta = it[i].length() / k;
+-            for (int j = 1; j <= k - 1; ++j) {
+-                splitPoints[i].push_back(it[i].inf + j * delta);
++            double delta = it[i].length() / k[i];
++	    if ( delta != 0 ){
++	    	for (int j = 1; j <= k[i] - 1; ++j) {
++                	splitPoints[i].push_back(it[i].inf + j * delta);
++            	}
++	    }
++        }
++    }
++
++    vector<vector<Interval>> chunks(dim);
++    for (int i = 0; i < dim; ++i) {
++        double prev = it[i].inf;
++        for (double x : splitPoints[i]) {
++            chunks[i].emplace_back(prev, x);
++            prev = x;
++        }
++        chunks[i].emplace_back(prev, it[i].sup);
++    }
++
++    vector<HyperBox> ret;
++    for (size_t i = 0; i < dim; ++i) {
++        vector<HyperBox> tmp = ret;
++        ret.clear();
++
++        for (const Interval& chunk : chunks[i]) {
++            if (i == 0) {
++                ret.push_back(HyperBox({chunk}));
++            } else {
++                for (HyperBox hbox : tmp) {
++                    HyperBox newBox = hbox;
++                    ++newBox.dim;
++                    newBox.it.push_back(chunk);
++		    if (i < dim - 1) {
++			    ret.push_back(newBox);
++		    }
++		    else{
++			    if (!newBox.check_out(this->hps, env)) {
++				    ret.push_back(newBox);
++			    }
++		    }
++                }
+             }
+         }
+     }
++    cout << "Boxes: " << ret.size() << endl;
++    return ret;
++}
++
++vector<HyperBox> HyperBox::split(int k, vector<vector<double>>& splitPoints, const GRBEnv& env) const {
++    if (!splitPoints.empty()) {
++        assert(splitPoints.size() == dim);
++        for (int i = 0; i < dim; ++i) {
++            for (double& x : splitPoints[i]) {
++                x = it[i].inf + x * (it[i].sup - it[i].inf);
++            }
++        }
++    } else {
++        splitPoints.resize(dim);
++        for (int i = 0; i < dim; ++i) {
++            double delta = it[i].length() / k;
++	    if ( delta != 0 ){
++	    	for (int j = 1; j <= k - 1; ++j) {
++                	splitPoints[i].push_back(it[i].inf + j * delta);
++            	}
++	    }
++        }
++    }
+ 
+     vector<vector<Interval>> chunks(dim);
+     for (int i = 0; i < dim; ++i) {
+@@ -132,14 +282,23 @@ vector<HyperBox> HyperBox::split(int k, vector<vector<double>>& splitPoints) con
+                     HyperBox newBox = hbox;
+                     ++newBox.dim;
+                     newBox.it.push_back(chunk);
+-                    ret.push_back(newBox);
++		    if (i < dim - 1) {
++			    ret.push_back(newBox);
++		    }
++		    else{
++			    if (!newBox.check_out(this->hps, env)) {
++				    ret.push_back(newBox);
++			    }
++		    }
+                 }
+             }
+         }
+     }
++    cout << "Boxes: " << ret.size() << endl;
+     return ret;
+ }
+ 
++
+ int HyperBox::getIndexToCut(pair<bool, vector<Interval>> grad) const {
+     vector<double> ret;
+ 
+@@ -178,7 +337,7 @@ Interval& HyperBox::operator[](int i) {
+     return it[i];
+ }
+ 
+-vector<HyperBox> branching(HyperBox& box, int p, pair<bool, vector<Interval>> grad) {
++vector<HyperBox> branching(HyperBox& box, int p, const vector<HP>& hps, pair<bool, vector<Interval>> grad, const GRBEnv& env) {
+     int t = box.getIndexToCut(grad);
+     double delta = (box[t].sup - box[t].inf) / p;
+     vector<HyperBox> ret;
+@@ -186,7 +345,9 @@ vector<HyperBox> branching(HyperBox& box, int p, pair<bool, vector<Interval>> gr
+     for (int q = 0; q < p; ++q) {
+         HyperBox tmp = box;
+         tmp[t] = {tmp[t].inf + delta*q, tmp[t].inf + delta*(q+1)};
+-        ret.push_back(tmp);
++	if ( !tmp.check_out(hps, env) ){
++        	ret.push_back(tmp);
++	}
+     }
+ 
+     return ret;
+@@ -289,7 +450,8 @@ double LipschitzFunction::getUpperBound(const HyperBox& subdomain, PointD x) con
+     }
+ }
+ 
+-double LipschitzFunction::maximize(double epsilon, int p, Statistics& counter, int maxIter) const {
++double LipschitzFunction::maximize_old(double epsilon, int p, Statistics& counter, const GRBEnv& env, int maxIter) const {
++    auto hps = domain.hps;
+     PointD x_opt = domain.center();
+     double f_opt = f(x_opt);
+ 
+@@ -348,8 +510,104 @@ double LipschitzFunction::maximize(double epsilon, int p, Statistics& counter, i
+             continue;
+         }
+ 
+-        vector<HyperBox> newBoxes = branching(hbox, p, grad);
++        vector<HyperBox> newBoxes = branching(hbox, p, hps, grad, env);
++        // Evaluation of sub-problems
++        for (HyperBox chunkBox : newBoxes) {
++            vector<double> x = chunkBox.center();
++            double f_x = f(x);
++
++            if (f_x > f_opt) {
++                f_opt = f_x;
++            }
++
++            double chunkBound = getUpperBound(chunkBox, x);
++            if (chunkBound - f_opt > epsilon) {
++                pq.push({chunkBox, chunkBound});
++            }
++        }
++    }
++
++    double ret = f_opt + epsilon;
++    while (!pq.empty()) {
++        pair<HyperBox, double> top = pq.top();
++        pq.pop();
++        ret = max(ret, top.second);
++    }
++    return ret;
++}
++
++double LipschitzFunction::maximize(double epsilon, int p, Statistics& counter, const GRBEnv& env, int maxIter) const {
++    auto hps = domain.hps;
++    if ( hps.size() == 0 ) {
++    	return this->maximize_old(epsilon, p, counter, env, maxIter);
++    }
++
++    PointD x_opt = domain.center();
++    double f_opt = f(x_opt);
++
++    if ((getUpperBound(domain, x_opt) - f_opt) <= epsilon) {
++        return getUpperBound(domain, x_opt);
++    }
++
++    auto cmp = [](pair<HyperBox, double> left, pair<HyperBox, double> right) {
++        return left.second > right.second;
++    };
++    priority_queue<pair<HyperBox, double>, std::vector<pair<HyperBox, double>>, decltype(cmp)> pq(cmp);
++    pq.push({domain, getUpperBound(domain, x_opt)});
++
++    
++    //cout << "Domain size:"<< domain.dim << endl;
++    for (int it = 0; it < maxIter && !pq.empty(); ++it) {
++        pair<HyperBox, double> top = pq.top();
++        pq.pop();
++
++        HyperBox hbox = top.first;
++        double bound = top.second;
++
++        if (bound < f_opt) {
++            continue;
++        }
++
++        pair<bool, vector<Interval>> grad = gradF_interval(hbox);
++
++        /*
++         * If function is differentiable on the entire hyperbox, make use of the gradients.
++         * For every dimension j such that partial derivative of the function w.r.t variable x_j is
++         * negative/positive on the entire hyperbox, set the value to left or right border of hyperbox immediately.
++         */
++        /*bool modifiedBox = false;
++        HyperBox newBox = hbox;
++
++        for (size_t i = 0; i < hbox.dim; ++i) {
++            if (hbox.it[i].sup > hbox.it[i].inf) {
++                if (grad.second[i].inf >= 0) {
++                    modifiedBox = true;
++                    newBox.it[i] = {hbox.it[i].sup, hbox.it[i].sup};
++                } else if (grad.second[i].sup <= 0) {
++                    modifiedBox = true;
++                    newBox.it[i] = {hbox.it[i].inf, hbox.it[i].inf};
++                }
++            }
++        }
++
++        if (modifiedBox) {
++            auto new_x = newBox.center();
++            if (f(new_x) > f_opt) {
++                f_opt = f(new_x);
++            }
++            double newBound = getUpperBound(newBox, new_x);
++            if (newBound - f_opt > epsilon) {
++		//if( !newBox.check_out(hps) ){
++                	pq.push({newBox, newBound});
++		//}
++		else{
++			cout << "Removed box" <<endl;
++		}
++            }
++            continue;
++        }*/
+ 
++        vector<HyperBox> newBoxes = branching(hbox, p, hps, grad, env);
+         // Evaluation of sub-problems
+         for (HyperBox chunkBox : newBoxes) {
+             vector<double> x = chunkBox.center();
+@@ -375,9 +633,9 @@ double LipschitzFunction::maximize(double epsilon, int p, Statistics& counter, i
+     return ret;
+ }
+ 
+-double LipschitzFunction::minimize(double epsilon, int p, Statistics& counter, int maxIter) const  {
++double LipschitzFunction::minimize(double epsilon, int p, Statistics& counter, const GRBEnv& env, int maxIter) const  {
+     LipschitzFunction selfNegative = -(*this);
+-    return -selfNegative.maximize(epsilon, p, counter, maxIter);
++    return -selfNegative.maximize(epsilon, p, counter, env, maxIter);
+ }
+ 
+ LipschitzFunction LipschitzFunction::getLinear(HyperBox domain, vector<double> weights, double bias, int degree) {
+diff --git a/code/utils/lipschitz.h b/code/utils/lipschitz.h
+index 9d4c61c..23fce4e 100644
+--- a/code/utils/lipschitz.h
++++ b/code/utils/lipschitz.h
+@@ -9,7 +9,7 @@
+ #include <algorithm>
+ #include <functional>
+ #include <random>
+-
++#include "gurobi_c++.h"
+ #pragma once
+ 
+ using namespace std;
+@@ -25,9 +25,18 @@ public:
+     PointD operator + (const PointD& other) const;
+ };
+ 
++class HP{
++
++public:
++	vector<double> w;
++	double b;
++    	HP(double* w_st, double* w_end, double b) { this->w = vector<double>(w_st, w_end); this->b = b; }
++};
++
+ class HyperBox {
+ 
+ public:
++    vector<HP> hps;
+     vector<Interval> it;
+     size_t dim;
+     
+@@ -39,10 +48,14 @@ public:
+     double diameter() const;
+     Interval& operator[](int i);
+     vector<PointD> sample(int, std::default_random_engine) const; // sample point from HyperBox uniformly at random
+-    vector<HyperBox> split(int k, vector<vector<double>>& splitPoints) const; // split HyperBox in smaller HyperBoxes, make k splits per dimension
++    vector<HyperBox> split(int k, vector<vector<double>>& splitPoints, const GRBEnv& env) const; // split HyperBox in smaller HyperBoxes, make k splits per dimension
++    vector<HyperBox> split(int *k, vector<vector<double>>& splitPoints, const GRBEnv& env) const; // split HyperBox in smaller HyperBoxes, make k splits per dimension
+     bool inside(PointD p) const; // check whether point is inside of hbox
+     void split(size_t dim1, HyperBox& hbox1, HyperBox& hbox2) const;
+     static HyperBox concatenate(const HyperBox& hbox1, const HyperBox& hbox2);
++    PointD dev() const;
++    bool hp_out(const HP &hp) const;
++    bool check_out(const vector<HP> &hps, const GRBEnv& env) const;
+ };
+ 
+ std::ostream& operator << (std::ostream& os, const PointD& pt);
+@@ -81,12 +94,13 @@ public:
+     double getUpperBoundTriangle(const HyperBox& subdomain, PointD x, pair<bool, vector<Interval>> grad) const;
+     double getUpperBound(const HyperBox& subdomain, PointD x) const;
+ 
+-    double maximize(double epsilon, int p, Statistics& counter, int maxIter = 1000000000) const;
+-    double minimize(double epsilon, int p, Statistics& counter, int maxIter = 1000000000) const;
++    double maximize(double epsilon, int p, Statistics& counter, const GRBEnv& env, int maxIter = 1000000000) const;
++    double maximize_old(double epsilon, int p, Statistics& counter, const GRBEnv& env, int maxIter = 1000000000) const;
++    double minimize(double epsilon, int p, Statistics& counter, const GRBEnv& env, int maxIter = 1000000000) const;
+ 
+     static LipschitzFunction getLinear(HyperBox domain, vector<double> weights, double bias, int degree);
+ };
+ 
+ LipschitzFunction operator * (const double, const LipschitzFunction&);
+-vector<HyperBox> branching(HyperBox& box, int p, pair<bool, vector<Interval>> grad);
++vector<HyperBox> branching(HyperBox& box, int p, const vector<HP> &hps, pair<bool, vector<Interval>> grad, const GRBEnv& env);
+ 
+diff --git a/code/utils/polyhedra_optimizer.cpp b/code/utils/polyhedra_optimizer.cpp
+index 467c7f5..5469390 100644
+--- a/code/utils/polyhedra_optimizer.cpp
++++ b/code/utils/polyhedra_optimizer.cpp
+@@ -2,7 +2,7 @@
+ #include <random>
+ 
+ pair<vector<double>, double> findLower(
+-        GRBEnv env,
++        const GRBEnv &env,
+         LipschitzFunction lf,
+         std::default_random_engine generator,
+         int k,
+@@ -59,14 +59,114 @@ pair<vector<double>, double> findLower(
+         }
+     }
+     auto lowF = LipschitzFunction::getLinear(lf.domain, wOpt, biasOpt, degree);
+-    double maxViolation = (lowF - lf).maximize(eps, 3, counter);
+-    biasOpt -= maxViolation;
++    auto vioF = lowF - lf;
++    
++    double maxViolation = vioF.maximize(eps, 3, counter, env);
+     
++    /*vector<Interval> hp_new = vector<Interval>();
++    hp_new.push_back( Interval( vioF.domain.hps[1].b, -vioF.domain.hps[0].b ) );
++    hp_new.push_back( Interval( vioF.domain.hps[3].b, -vioF.domain.hps[2].b ) );
++    hp_new.push_back( vioF.domain.it[2] );
++    vioF.domain = HyperBox( hp_new );
++    double maxViolation2 = vioF.maximize(eps, 3, counter, env);
++    if ( maxViolation + eps < maxViolation2 ) {
++	    cout << "VioUs " << maxViolation << " VioThem " << maxViolation2 << endl;
++	    assert( false );
++    }*/
++    biasOpt -= maxViolation;
++   
++
+     return {wOpt, biasOpt};
+ }
+ 
++pair< double, pair<pair<vector<double>, double>, pair<vector<double>, double>> > findMILP(
++        const GRBEnv &env,
++        LipschitzFunction lfLower,
++        LipschitzFunction lfUpper,
++        std::default_random_engine generator,
++        int k,
++        int degree, 
++	double target) {
++    /**
++     * @param env Gurobi env
++     * @param lf Lipschitz continuous function for which lower bound should be found
++     * @param generator random numbers generator
++     * @param k number of points to sample initially for constraints
++     * @param eps epsilon for Lipschitz optimization
++     * @param degree degree of the polyhedra constraint
++     * @param counter: object that counts how many steps the optimizer performes
++     */
++    GRBModel model = GRBModel(env);
++    model.set(GRB_IntParam_OutputFlag, 0);
++    assert( lfUpper.domain.dim == lfLower.domain.dim );
++    vector<GRBVar> wLower, wUpper;
++    for (size_t i = 0; i < lfLower.domain.dim; ++i) {
++        for (int j = 0; j < degree; ++j) {
++            wLower.push_back(model.addVar(-Constants::MAX_COEFF, Constants::MAX_COEFF, 0.0, GRB_CONTINUOUS,"Lw_" + to_string(i) + to_string(j)));
++            wUpper.push_back(model.addVar(-Constants::MAX_COEFF, Constants::MAX_COEFF, 0.0, GRB_CONTINUOUS,"Uw_" + to_string(i) + to_string(j)));
++        }
++    }
++    GRBVar biasLower = model.addVar(-Constants::MAX_COEFF, Constants::MAX_COEFF, 0.0, GRB_CONTINUOUS, "biasL");
++    GRBVar biasUpper = model.addVar(-Constants::MAX_COEFF, Constants::MAX_COEFF, 0.0, GRB_CONTINUOUS, "biasU");
++
++    vector<PointD> samples = lfLower.domain.sample(k, generator);
++    GRBLinExpr obj = 0;
++    GRBLinExpr avgDiff = 0;
++
++    vector<GRBVar> nonactives;
++    for (const PointD& sample : samples) {
++        double evalFLower = lfLower.f(sample);
++        double evalFUpper = lfUpper.f(sample);
++	GRBVar nonactive = model.addVar(0.0, 1.0, 0.0, GRB_BINARY);
++	nonactives.push_back( nonactive );
++
++        // Add constraint w[0]*sample.x[0] + bias <= evalF
++        GRBLinExpr evalPolyLower = biasLower;
++        GRBLinExpr evalPolyUpper = biasUpper;
++        for (size_t i = 0; i < lfLower.domain.dim; ++i) {
++            for (int j = 0; j < degree; ++j) {
++                evalPolyLower += wLower[i * degree + j] * pow(sample.x[i], j + 1);
++                evalPolyUpper += wUpper[i * degree + j] * pow(sample.x[i], j + 1);
++            }
++        }
++	avgDiff += evalPolyUpper - evalPolyLower;
++	evalPolyLower -= nonactive * 100;
++	evalPolyUpper += nonactive * 100;
++        model.addConstr(evalPolyLower <= evalFLower);
++        model.addConstr(evalPolyUpper >= evalFUpper);
++        obj += nonactive;
++    }
++    model.addConstr( avgDiff <= target*k );
++    model.setObjective(obj, GRB_MINIMIZE);
++    model.set(GRB_DoubleParam_TimeLimit, 10);
++    model.optimize();
++    if ( model.get(GRB_IntAttr_Status) != 2 && model.get(GRB_IntAttr_Status) != 9 ) {
++    	cout << "Status " << model.get(GRB_IntAttr_Status) << endl;
++	model.computeIIS();
++	model.write("bad.ilp");
++    }
++
++    double violated_percent = ceil( model.get(GRB_DoubleAttr_ObjBound) ) / k;
++
++    double avgvol = avgDiff.getValue()/k;
++	    
++    // Now find the maximum global violation and adjust bias
++    double biasOptLower = biasLower.get(GRB_DoubleAttr_X);
++    double biasOptUpper = biasUpper.get(GRB_DoubleAttr_X);
++    vector<double> wOptLower;
++    vector<double> wOptUpper;
++    for (size_t i = 0; i < lfLower.domain.dim; ++i) {
++        for (int j = 0; j < degree; ++j) {
++            wOptLower.push_back(wLower[i * degree + j].get(GRB_DoubleAttr_X));
++            wOptUpper.push_back(wLower[i * degree + j].get(GRB_DoubleAttr_X));
++        }
++    }
++    return { avgvol, {{wOptLower, biasOptLower}, {wOptUpper,biasOptUpper}} };
++}
++
++
+ pair<vector<double>, double> findUpper(
+-        GRBEnv env,
++        const GRBEnv& env,
+         LipschitzFunction lf,
+         std::default_random_engine generator,
+         int k,
+diff --git a/code/utils/polyhedra_optimizer.h b/code/utils/polyhedra_optimizer.h
+index 675b433..d5a08a7 100644
+--- a/code/utils/polyhedra_optimizer.h
++++ b/code/utils/polyhedra_optimizer.h
+@@ -3,6 +3,6 @@
+ #include "gurobi_c++.h"
+ #include <vector>
+ 
+-std::pair<std::vector<double>, double> findLower(GRBEnv env, LipschitzFunction, std::default_random_engine, int, double, int, Statistics& counter);
+-std::pair<std::vector<double>, double> findUpper(GRBEnv env, LipschitzFunction, std::default_random_engine, int, double, int, Statistics& counter);
+-
++std::pair<std::vector<double>, double> findLower(const GRBEnv& env, LipschitzFunction, std::default_random_engine, int, double, int, Statistics& counter);
++std::pair<std::vector<double>, double> findUpper(const GRBEnv& env, LipschitzFunction, std::default_random_engine, int, double, int, Statistics& counter);
++std::pair< double, std::pair<std::pair<std::vector<double>, double>, std::pair<std::vector<double>, double>> > findMILP(const GRBEnv &env, LipschitzFunction lfLower, LipschitzFunction lfUpper, std::default_random_engine generator, int k, int degree, double target);

@@ -1,0 +1,16 @@
+dataset               cifar10
+noise                 0
+chunks                1
+inside_splits         12
+method                polyhedra
+spatial_transform     Scale(0.95,1.05);Rotation(-8,8)
+pixel_transform       Brightness(0.99,1.01,-0.01,0.01)
+num_tests             100
+ub_estimate           Triangle
+num_attacks           1000
+poly_eps              0.03
+num_threads           16
+max_coeff             20
+lp_samples            1000
+num_poly_check        50
+set                   test

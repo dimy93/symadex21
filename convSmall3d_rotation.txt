@@ -1,0 +1,15 @@
+dataset               mnist
+noise                 0
+chunks                1
+inside_splits         50
+method                polyhedra
+spatial_transform     Rotation(-17,17);Scale(0.82,1.18);Shear(-0.03,0.03)
+num_tests             1
+ub_estimate           Triangle
+num_attacks           15000
+poly_eps              0.01
+num_threads           16
+max_coeff             20
+lp_samples            1000
+num_poly_check        50
+set                   test                            

@@ -4,14 +4,51 @@ chmod 777 Miniconda3-latest-Linux-x86_64.sh
 ./Miniconda3-latest-Linux-x86_64.sh
 rm ./Miniconda3-latest-Linux-x86_64.sh
 
+git checkout 136b5ec5970e41036b109922f32525c53c1a4067 
+cd tf_verify
+cp ../patch_ERAN.txt ./
+git apply patch_ERAN.txt
+cd ../
+
+install=0
+has_cuda=0
+CONDA_ENV=eran_symadex_geometric
+
+while [[ $# -gt 0 ]]
+do
+key="$1"
+
+case $key in
+    -c|--use-cuda)
+    has_cuda=1
+    shift # past argument
+    ;;
+    -n|--name)
+    CONDA_ENV="$2"
+    shift # past argument
+    shift # past value
+    ;;
+    -i|--install-conda)
+    install=1
+    shift # past argument
+    ;;
+esac
+done
+
+if test "$install" -eq 1
+then
+	wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+	chmod 777 Miniconda3-latest-Linux-x86_64.sh
+	./Miniconda3-latest-Linux-x86_64.sh
+	rm ./Miniconda3-latest-Linux-x86_64.sh
+fi
+
 source ~/miniconda3/bin/activate
 
-ELINA_VER=62ccc06539d8103a436e219ed2cfb78e489048f6 
-CONDA_ENV=eran_symadex
 conda create -n ${CONDA_ENV} python=3.7
 conda activate ${CONDA_ENV}
 
-conda install -c anaconda tensorflow==1.15
+conda install -c conda-forge tensorflow==1.15
 
 GEOMETRIC_HOME="$(pwd)/ELINA_install/build"
 GEOMETRIC_HOME_BIN="$(pwd)/ELINA_install/build/bin"
@@ -29,20 +66,11 @@ export PATH=${GEOMETRIC_HOME_BIN}/bin:${PATH}
 
 set -e
 
-has_cuda=0
+if test "$has_cuda" -eq 1
+then
+    conda install -c conda-forge cudatoolkit-dev
+fi
 
-while : ; do
-    case "$1" in
-        "")
-            break;;
-        -use-cuda|--use-cuda)
-         has_cuda=1;;
-        *)
-            echo "unknown option $1, try -help"
-            exit 2;;
-    esac
-    shift
-done
 
 wget ftp://ftp.gnu.org/gnu/m4/m4-1.4.1.tar.gz
 tar -xvzf m4-1.4.1.tar.gz
@@ -78,6 +106,66 @@ echo "$(pwd)"
 cp -r "${GEOMETRIC_HOME_LIB}/include/"* "${GEOMETRIC_HOME_BIN}/include"
 export MPFR_PREFIX="${GEOMETRIC_HOME_BIN}"
 
+mkdir -p cddlib_tools
+export CDD_PATH=$PATH
+export PATH=$PWD/cddlib_tools/bin:$PATH
+
+
+wget ftp://ftp.gnu.org/gnu/m4/m4-1.4.18.tar.gz
+tar -xvzf m4-1.4.18.tar.gz
+cp m4-1.4.18-glibc-change-work-around.patch ./m4-1.4.18/lib
+cd m4-1.4.18
+cd lib
+export lddver=$(ldd --version | head -1 | awk '{print $NF}')
+if [ "$lddver" \> "2.27" ];
+then
+	        patch < m4-1.4.18-glibc-change-work-around.patch
+fi
+cd ..
+./configure --prefix "$PWD/../cddlib_tools/"
+make
+make install
+cd ..
+rm m4-1.4.18.tar.gz
+
+wget http://ftp.gnu.org/gnu/autoconf/autoconf-2.69.tar.gz
+tar xf autoconf*
+cd autoconf-2.69
+./configure --prefix "$PWD/../cddlib_tools/"
+make install
+cd ..
+
+wget http://ftp.gnu.org/gnu/automake/automake-1.16.2.tar.gz
+tar xf automake*
+cd automake-1.16.2
+./configure --prefix "$PWD/../cddlib_tools/"
+make install
+cd ..
+
+wget http://ftp.gnu.org/gnu/libtool/libtool-2.4.6.tar.gz
+tar xf libtool*
+cd libtool-2.4.6
+./configure --prefix "$PWD/../cddlib_tools/"
+make install
+cd ..
+
+git clone https://github.com/cddlib/cddlib.git
+cd cddlib
+./bootstrap || true
+libtoolize
+./bootstrap
+./configure --prefix "${GEOMETRIC_HOME_LIB}" --exec-prefix="${GEOMETRIC_HOME_BIN}" --with-gmp-include="${GMP_PREFIX}/include/" --with-gmp-lib="${GMP_PREFIX}/lib/"
+sed -i 's/= doc lib-src src/= lib-src src/' Makefile.am
+sed -i 's#CC = gcc#CC = gcc -I '"${GMP_PREFIX}/include/"'#' lib-src/Makefile
+sed -i 's#CC = gcc#CC = gcc -I '"${GMP_PREFIX}/include/"'#' src/Makefile
+make
+make install
+cd ..
+
+cp -r "${GEOMETRIC_HOME_LIB}/include/cddlib/"* "${GEOMETRIC_HOME_BIN}/include"
+export PATH=$CDD_PATH
+export CDD_PREFIX="${GEOMETRIC_HOME_LIB}"
+
 wget https://packages.gurobi.com/9.0/gurobi9.0.3_linux64.tar.gz
 tar -xvf gurobi9.0.3_linux64.tar.gz
 cd gurobi903/linux64/src/build
@@ -95,30 +183,6 @@ export PATH="${GUROBI_HOME}/bin:${PATH}"
 export CPATH="${GUROBI_HOME}/include:${CPATH}"
 export LD_LIBRARY_PATH=${GUROBI_HOME}/lib:${LD_LIBRARY_PATH}
 
-git clone https://github.com/eth-sri/ELINA.git
-cd ELINA
-git checkout ${ELINA_VER}
-if test "$has_cuda" -eq 1
-then
-    ./configure -use-cuda --prefix "${GEOMETRIC_HOME_BIN}"
-else
-    ./configure --prefix "${GEOMETRIC_HOME_BIN}"
-fi
-
-make
-make install
-cd ..
-
-git clone https://github.com/eth-sri/deepg.git
-cd deepg/code
-mkdir build
-make shared_object
-cp ./build/libgeometric.so ${GEOMETRIC_HOME_BIN}/lib
-cd ../..
-
-
-pip install -r requirements.txt
-
 mkdir -p ${CONDA_PREFIX}/etc/conda/activate.d
 mkdir -p ${CONDA_PREFIX}/etc/conda/deactivate.d
 touch ${CONDA_PREFIX}/etc/conda/activate.d/env_vars.sh
@@ -128,3 +192,32 @@ echo -e '#!/bin/sh\n\nif [[ -v OLD_LD_LIBRARY_PATH ]];\nthen\n\texport LD_LIBRAR
 
 echo -e '#!/bin/sh\n\nexport OLD_LD_LIBRARY_PATH=${LD_LIBRARY_PATH}\nexport LD_LIBRARY_PATH='"${GEOMETRIC_HOME_BIN}/lib:${GUROBI_HOME}/lib:"'${LD_LIBRARY_PATH}\n\nexport OLD_LIBRARY_PATH=${LIBRARY_PATH}\nexport LIBRARY_PATH='"${GEOMETRIC_HOME_BIN}/lib:${GUROBI_HOME}/lib:"'${LIBRARY_PATH}\n\nexport OLD_PATH=${PATH}\nexport PATH='"${GEOMETRIC_HOME_BIN}/bin:${GUROBI_HOME}/bin:"'${PATH}\n\nexport OLD_C_INCLUDE_PATH=${C_INCLUDE_PATH}\nexport C_INCLUDE_PATH='"${GEOMETRIC_HOME_BIN}/include:${GUROBI_HOME}/include:"'${C_INCLUDE_PATH}\n\nexport OLD_CPATH=${CPATH}\nexport CPATH='"${GEOMETRIC_HOME_BIN}/include:${GUROBI_HOME}/include:"'${CPATH}\n\nexport OLD_CPLUS_INCLUDE_PATH=${CPLUS_INCLUDE_PATH}\nexport CPLUS_INCLUDE_PATH='"${GEOMETRIC_HOME_BIN}/include:${GUROBI_HOME}/include:"'${CPLUS_INCLUDE_PATH}' > ${CONDA_PREFIX}/etc/conda/activate.d/env_vars.sh
 
+git clone https://github.com/eth-sri/ELINA.git
+cd ELINA
+git checkout 946397108597cb3562fc530bc97d505e3f5babf2
+cp ../patch_ELINA.txt ./
+git apply patch_ELINA.txt
+if test "$has_cuda" -eq 1
+then
+    ./configure -use-cuda -use-deeppoly -use-gurobi -use-fconv --prefix "${GEOMETRIC_HOME_BIN}"  -cdd-prefix "${CDD_PREFIX}"
+else
+    ./configure -use-deeppoly -use-gurobi -use-fconv --prefix "${GEOMETRIC_HOME_BIN}"  -cdd-prefix "${CDD_PREFIX}"
+fi
+
+make
+make install
+cd ..
+
+git clone https://github.com/eth-sri/deepg.git
+cd deepg
+git checkout b59e86c46cbb2966d4066e55cb418f2165afd15d
+cp ../patch_deepg.txt ./
+git apply patch_deepg.txt
+cd code
+mkdir build
+make shared_object
+cp ./build/libgeometric.so ${GEOMETRIC_HOME_BIN}/lib
+cd ../..
+
+
+pip install -r requirements.txt
