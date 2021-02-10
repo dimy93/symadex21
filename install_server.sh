@@ -1,4 +1,9 @@
 #!/bin/bash
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+chmod 777 Miniconda3-latest-Linux-x86_64.sh
+./Miniconda3-latest-Linux-x86_64.sh
+rm ./Miniconda3-latest-Linux-x86_64.sh
+
 source ~/miniconda3/bin/activate
 
 ELINA_VER=62ccc06539d8103a436e219ed2cfb78e489048f6 
