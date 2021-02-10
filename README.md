@@ -71,24 +71,51 @@ cp * eran/
 cd eran/
 ./install_server.sh 
 ```
-To run the our approach on MNIST convSmall call the ***run\_mnist.sh*** script as follows:
+To run the geometric 3D Rotation experiments on MNIST convSmall call the ***3d\_convSmall\_rotation.sh*** script as follows:
 ```
 cd tf_verify/
-./run_mnist.sh
+./3d_convSmall_rotation.sh
 ```
-To run the our approach on CIFAR10 convSmall call the ***run\_cifar10.sh*** script as follows:
+To run the geometric 3D Rotation experiments on MNIST convBig call the ***3d\_convBig\_rotation.sh*** script as follows:
 ```
-cd ERAN/tf_verify/
-./run_cifar10.sh
+cd tf_verify/
+./3d_convBig_rotation.sh
 ```
-To run the our approach on MNIST convBig call the ***run\_mnist\_big.sh*** script as follows:
+To run the geometric 3D Rotation experiments on CIFAR10 convSmall call the ***3d\_cifar\_rotation.sh*** script as follows:
 ```
-cd ERAN/tf_verify/
-./run_mnist_big.sh
+cd tf_verify/
+./3d_cifar_rotation.sh
 ```
-To run the our approach on MNIST 8x200 call the ***run\_mnist\_ffn.sh*** script as follows:
+To run the geometric 3D Translation experiments on MNIST convSmall call the ***3d\_convSmall\_translation.sh*** script as follows:
 ```
-cd ERAN/tf_verify/
-./run_mnist_ffn.sh
+cd tf_verify/
+./3d_convSmall_translation.sh
 ```
-The resulting symbolic adversarial examples will appear under ***./ERAN/tf\_verify/NetworkName\_ImgNum\_class\_AdvClass\_it\_Iteration***.
+To run the geometric 3D Translation experiments on MNIST convBig call the ***3d\_convBig\_translation.sh*** script as follows:
+```
+cd tf_verify/
+./3d_convBig_translation.sh
+```
+To run the geometric 3D Translation experiments on CIFAR10 convSmall call the ***3d\_cifar\_translation.sh*** script as follows:
+```
+cd tf_verify/
+./3d_cifar_translation.sh
+```
+To run the geometric 4D Rotation experiments on MNIST convSmall call the ***3d\_convSmall\_translation.sh*** script as follows:
+```
+cd tf_verify/
+./4d_convSmall_rotation.sh
+```
+To run the geometric 4D Rotation experiments on MNIST convBig call the ***3d\_convBig\_translation.sh*** script as follows:
+```
+cd tf_verify/
+./4d_convBig_rotation.sh
+```
+To run the geometric 4D Rotation experiments on CIFAR10 convSmall call the ***3d\_cifar\_translation.sh*** script as follows:
+```
+cd tf_verify/
+./4d_cifar_rotation.sh
+```
+The experiments' output will appear under ***tf\_verify/TransformationName\_NetworkName\_cifar\_0\_100.txt***.
+
+
