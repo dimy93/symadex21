@@ -10,6 +10,8 @@ To download and install the code for pixel intensity CIFAR10 and MNIST experimen
 git clone https://github.com/dimy93/symadex21
 cd symadex21
 ./install_server.sh 
+source ~/miniconda3/bin/activate
+conda activate eran_symadex
 ```
 To run the our approach on MNIST convSmall call the ***run\_mnist.sh*** script as follows:
 ```
