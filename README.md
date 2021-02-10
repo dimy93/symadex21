@@ -53,8 +53,8 @@ To run the baseline on MNIST 8x200 call the ***run\_mnist\_ffn\_baseline.sh*** s
 cd tf_verify/
 ./run_mnist_ffn_baseline.sh
 ```
-The resulting symbolic adversarial examples will appear under ***./ERAN/tf\_verify/NetworkName\_ImgNum\_class\_AdvClass\_it\_Iteration***.
-
+The resulting robust adversarial examples from our approach will appear under ***./tf\_verify/NetworkName\_ImgNum\_class\_AdvClass\_it\_Iteration***. The output of our method will appear under ***./tf\_verify/NetworkName\_ImgNum.txt***
+The resulting robust adversarial examples from the baseline will appear under ***./tf\_verify/NetworkName\_ImgNum\_class\_AdvClass\_baseline\_it\_Iteration***. The output of the baseline experiment will appear under ***./tf\_verify/NetworkName\_baseline\_ImgNum.txt***
 
 
 CIFAR10 and MNIST Geometric Experiments
