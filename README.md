@@ -9,11 +9,11 @@ To download and install the code for pixel intensity CIFAR10 and MNIST experimen
 ```
 git clone https://github.com/dimy93/symadex21
 cd symadex21
-./install.sh 
+./install_server.sh 
 ```
 To run the our approach on MNIST convSmall call the ***run\_mnist.sh*** script as follows:
 ```
-cd ERAN/tf_verify/
+cd tf_verify/
 ./run_mnist.sh
 ```
 To run the our approach on CIFAR10 convSmall call the ***run\_cifar10.sh*** script as follows:
@@ -38,23 +38,30 @@ The resulting symbolic adversarial examples will appear under ***./ERAN/tf\_veri
 CIFAR10 and MNIST Geometric Experiments
 ------
 
-To download and install the code for the mortgage dataset experiments execute the following commands:
+To download and install the code for pixel intensity CIFAR10 and MNIST experiments execute the following commands:
 ```
-git clone https://github.com/dimy93/SymbolAdex.git
-cd SymbolAdex
-git checkout mortgage
-sudo ./install.sh
+git clone https://github.com/dimy93/symadex21
+cd symadex21
+./install_server.sh 
 ```
-To run the mortgage dataset experiments that use the triangle convex relaxation call the ***mortgage\_lp.sh*** script as follows:
+To run the our approach on MNIST convSmall call the ***run\_mnist.sh*** script as follows:
+```
+cd tf_verify/
+./run_mnist.sh
+```
+To run the our approach on CIFAR10 convSmall call the ***run\_cifar10.sh*** script as follows:
 ```
 cd ERAN/tf_verify/
-./mortgage_lp.sh
+./run_cifar10.sh
 ```
-To run the mortgage dataset experiments that use the DeepPoly convex relaxation call the ***mortgage\_deeppoly.sh*** script as follows:
+To run the our approach on MNIST convBig call the ***run\_mnist\_big.sh*** script as follows:
 ```
 cd ERAN/tf_verify/
-./mortgage_deeppoly.sh
+./run_mnist_big.sh
 ```
-Visualisation of the resuls will appear in ***./ERAN/tf\_verify/mortgage\_ImgNum\_class\_0\_seed\_Seed***.
-
-The resulting symbolic adversarial examples will appear under ***./ERAN/tf\_verify/mortgage\_ImgNum\_class\_0\_seed\_Seed\_it\_Iteration***.
+To run the our approach on MNIST 8x200 call the ***run\_mnist\_ffn.sh*** script as follows:
+```
+cd ERAN/tf_verify/
+./run_mnist_ffn.sh
+```
+The resulting symbolic adversarial examples will appear under ***./ERAN/tf\_verify/NetworkName\_ImgNum\_class\_AdvClass\_it\_Iteration***.
