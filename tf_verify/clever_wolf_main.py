@@ -802,8 +802,6 @@ os.sched_setaffinity(0,list(range(8)))
 cut_model, is_conv, means, stds, img, _, _, layers, _, _ = create_tf_model( netname, dataset, img, args.model )
 cut_model.graph_layers = layers
 
-#from armando import create_hact_region_graph, genExplanation, simplify_region, get_volume
-#hact_ten = create_hact_region_graph( layers )
 
 import atexit
 atexit.register(destroy_pool)
